@@ -1,0 +1,2 @@
+# stdlib-only app — no pip installs needed.
+# (Kept so python_buildpack has a recognizable requirements file.)
