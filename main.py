@@ -66,7 +66,9 @@ def glibc_version():
         import ctypes
         lib = ctypes.CDLL("libc.so.6")
         if hasattr(lib, "gnu_get_libc_version"):
-            return lib.gnu_get_libc_version()
+            lib.gnu_get_libc_version.restype = ctypes.c_char_p
+            v = lib.gnu_get_libc_version()
+            return v.decode() if isinstance(v, bytes) else str(v)
     except Exception:
         pass
     return None
@@ -171,7 +173,15 @@ def listening_sockets():
             else:
                 addr = "ipv6"
             out.append({"address": addr, "port": port})
-    return out
+    # de-duplicate (same port shows in tcp + tcp6 and per-socket)
+    seen = set()
+    deduped = []
+    for s in out:
+        key = (s["address"], s["port"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(s)
+    return deduped
 
 
 def network_info():
