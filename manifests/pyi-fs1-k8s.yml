@@ -17,3 +17,6 @@ applications:
   env:
     GIT_REPO_URL: "https://github.com/bkirkware/kirkware-py-inspector.git"
     GIT_COMMIT: "unknown"
+    BUILDPACK_NAME: ""
+    BUILDPACK_VERSION: ""
+    APP_STACK: ""

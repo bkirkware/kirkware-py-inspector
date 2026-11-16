@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_NAME = "kirkware-py-inspector"
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 START_TIME = time.time()
 HOST = os.environ.get("BIND", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -159,6 +159,9 @@ def os_info():
         "memory_available_mb": avail_mb,
         "disk": disk,
         "cf_stack_file": _read("/etc/cf-stack"),
+        # Stack name: env is authoritative (stamped by deploy.sh at push
+        # time); /etc/cf-stack is the in-droplet fallback when present.
+        "stack": os.environ.get("APP_STACK") or _read("/etc/cf-stack"),
     }
 
 
@@ -533,6 +536,13 @@ def buildpack_runtime_info():
     py = platform.python_version()
     py_ver = platform.python_version_tuple()
     return {
+        # Which buildpack built this app — not visible from inside the
+        # droplet, so it's stamped into the environment by deploy.sh at
+        # push time (name + the org-resolved version).
+        "buildpack": {
+            "name": os.environ.get("BUILDPACK_NAME"),
+            "version": os.environ.get("BUILDPACK_VERSION"),
+        },
         "python": {
             "version": py,
             "version_tuple": ".".join(py_ver),
@@ -787,6 +797,8 @@ PAGE = """<!doctype html>
   .hero-sub { font-size: 13px; color: var(--cds-color-construction-600);
               font-family: var(--cds-font-mono); word-break: break-all; margin-top: 2px; }
   .hero table.kv { margin: 0; border: 1px solid var(--cds-alias-border-subtle); border-radius: var(--cds-alias-border-radius); }
+  .summary-wrap table.kv { margin-top: 8px; border: 1px solid var(--cds-alias-border-subtle);
+                           border-radius: var(--cds-alias-border-radius); }
 
   /* ---- security group heading (Clarity section type: 20px/1.2em, 500) ---- */
   .sec-group { margin-top: var(--cds-global-space-3); }
@@ -855,6 +867,9 @@ function render(d) {
   const inst = d.instance;
   const cf = sec.platform.cloud_foundry, k8s = sec.platform.kubernetes;
   const os = sec.os_stack, ct = sec.container;
+  const app = sec.application_layer, br = sec.buildpack_runtime || {};
+  br.buildpack = br.buildpack || {};
+  br.buildpack_dep_layers = br.buildpack_dep_layers || [];
 
   // ---- 1. Container Instance (hero number) ----
   const idxLabel = inst.index !== null && inst.index !== undefined ? '#' + inst.index : '—';
@@ -868,18 +883,19 @@ function render(d) {
       <table class="kv">${kv([
         ['Started', d.app.started_at],
         ['Uptime', d.app.uptime],
-        ['Hostname', inst.hostname],
-        ['Internal IP', inst.internal_ip],
-        ['External IP', inst.ip],
-        ['PID 1', ct.pid1.comm + (ct.pid1.cmdline ? ' — ' + ct.pid1.cmdline : '')],
-        ['Cgroup', ct.cgroups && ct.cgroups.length ? ct.cgroups[0] : (ct.cgroup_unified || null)],
+      ])}</table></div>` +
+    `<div class="summary-wrap"><div class="hero-label" style="margin-bottom:8px">layer summary</div>
+      <table class="kv">${kv([
+        ['Application Layer', app.application.name + ' — v' + app.application.app_version],
+        ['Buildpack', (br.buildpack.name || 'unknown') + ' — v' + (br.buildpack.version || 'unknown')],
+        ['Stack', os.stack || 'unknown'],
       ])}</table></div>`));
 
   // ---- 2. Security (group) ----
   const secPanels = [];
 
   // 2.1 Application Layer (env vars as accordion)
-  const app = sec.application_layer, rep = app.repository;
+  const rep = app.repository;
   const envRows = d.environment_variables.map(e => [e.name, e.value]);
   const envAcc = acc('environment variables — ' + d.environment_variables.length + ' vars · secrets masked',
     `<table class="kv">${kv(envRows)}</table>`);
@@ -912,8 +928,8 @@ function render(d) {
     depBody));
 
   // 2.3 Buildpack (runtime)
-  const br = sec.buildpack_runtime;
   let bpBody = `<table class="kv">${kv([
+    ['Buildpack', br.buildpack.name ? br.buildpack.name + ' — v' + (br.buildpack.version || 'unknown') : 'not detected'],
     ['Python runtime', br.python.version + ' (' + br.python.implementation + ')'],
     ['Python build', br.python.full],
     ['Python executable', br.python.executable],
@@ -930,9 +946,9 @@ function render(d) {
   // 2.4 Stack (root filesystem)
   const h = os.hardening;
   let stackBody = `<table class="kv">${kv([
+    ['Stack', os.stack],
     ['Distribution', os.distribution],
     ['OS release', os.os_release ? (os.os_release.VERSION + ' (' + (os.os_release.ID || '') + ' ' + (os.os_release.ID_LIKE || '') + ')') : null],
-    ['CF stack', os.cf_stack_file],
     ['Kernel', os.kernel + ' (' + os.arch + ')'],
     ['glibc', os.glibc],
     ['Hardening', h ? h.summary.join(' · ') : null],
@@ -944,6 +960,11 @@ function render(d) {
   secPanels.push(card('Stack (root filesystem)', 'ubuntu', os.distribution, 'neutral', stackBody));
 
   // 2.5 Container platform
+  const containerRows = [
+    ['Hostname', ct.hostname],
+    ['PID 1', ct.pid1.comm + (ct.pid1.cmdline ? ' — ' + ct.pid1.cmdline : '')],
+    ['Cgroup', ct.cgroups && ct.cgroups.length ? ct.cgroups[0] : (ct.cgroup_unified || null)],
+  ];
   const k8sRows = [
     ['API server', k8s.api_server.host ? k8s.api_server.host + ':' + k8s.api_server.port : null],
     ['Namespace', k8s.service_account.namespace || k8s.namespace_env || null],
@@ -953,7 +974,7 @@ function render(d) {
     ['JWT subject', k8s.service_account.jwt_sub],
     ['K8s env vars', Object.keys(k8s.env).length ? Object.entries(k8s.env).map(([k, v]) => k + '=' + v).join('; ') : null],
     ['k8s-app-entrypoint', ct.k8s_entrypoint_config ? 'present' : null],
-  ];
+  ].concat(containerRows);
   let platBody, platTag, platCls;
   if (k8s.detected) {
     platBody = `<table class="kv">${kv(k8sRows)}</table>`;
@@ -972,7 +993,7 @@ function render(d) {
       ['Build', cf.application && cf.application.build],
       ['Services', cf.services.map(s => s.name + ' [' + s.label + ':' + s.plan + ']').join(', ') || null],
       ['Buildpack dep layers', cf.buildpack_dep_layers.map(l => l.layer + ' (' + l.tools.length + ' tools)').join('  ') || null],
-    ])}</table>`;
+    ].concat(containerRows))}</table>`;
     if (cf.application) {
       platBody += acc('VCAP_APPLICATION raw', `<pre>${esc(JSON.stringify(cf.application, null, 2))}</pre>`);
     }
@@ -986,6 +1007,8 @@ function render(d) {
   // ---- 3. Networking ----
   const n = d.network;
   let netBody = `<table class="kv">${kv([
+    ['Internal IP', inst.internal_ip],
+    ['External IP', inst.ip],
     ['Hostname', n.hostname + (n.hostname_resolves_to.length ? ' → ' + n.hostname_resolves_to.join(', ') : '')],
     ['Default route', n.default_route ? 'via ' + n.default_route.gateway + ' on ' + n.default_route.interface : null],
     ['DNS servers', n.dns.nameservers.join(', ') || null],
