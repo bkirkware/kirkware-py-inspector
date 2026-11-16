@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_NAME = "kirkware-py-inspector"
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 START_TIME = time.time()
 HOST = os.environ.get("BIND", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -797,8 +797,6 @@ PAGE = """<!doctype html>
   .hero-sub { font-size: 13px; color: var(--cds-color-construction-600);
               font-family: var(--cds-font-mono); word-break: break-all; margin-top: 2px; }
   .hero table.kv { margin: 0; border: 1px solid var(--cds-alias-border-subtle); border-radius: var(--cds-alias-border-radius); }
-  .summary-wrap table.kv { margin-top: 8px; border: 1px solid var(--cds-alias-border-subtle);
-                           border-radius: var(--cds-alias-border-radius); }
 
   /* ---- security group heading (Clarity section type: 20px/1.2em, 500) ---- */
   .sec-group { margin-top: var(--cds-global-space-3); }
@@ -871,9 +869,10 @@ function render(d) {
   br.buildpack = br.buildpack || {};
   br.buildpack_dep_layers = br.buildpack_dep_layers || [];
 
-  // ---- 1. Container Instance (hero number) ----
+  // ---- 1. Summary (group: Container Instance + Layer Summary) ----
   const idxLabel = inst.index !== null && inst.index !== undefined ? '#' + inst.index : '—';
-  panels.push(card('Container Instance', 'box', d.runtime_environment,
+  const osRelease = os.os_release ? (os.os_release.VERSION + ' (' + (os.os_release.ID || '') + ' ' + (os.os_release.ID_LIKE || '') + ')') : null;
+  const instCard = card('Container Instance', 'box', d.runtime_environment,
     d.runtime_environment.includes('Kubernetes') ? 'k8s' : 'info',
     `<div class="hero"><div>
         <div class="hero-label">instance number</div>
@@ -883,13 +882,17 @@ function render(d) {
       <table class="kv">${kv([
         ['Started', d.app.started_at],
         ['Uptime', d.app.uptime],
-      ])}</table></div>` +
-    `<div class="summary-wrap"><div class="hero-label" style="margin-bottom:8px">layer summary</div>
-      <table class="kv">${kv([
-        ['Application Layer', app.application.name + ' — v' + app.application.app_version],
-        ['Buildpack', (br.buildpack.name || 'unknown') + ' — v' + (br.buildpack.version || 'unknown')],
-        ['Stack', os.stack || 'unknown'],
-      ])}</table></div>`));
+      ])}</table></div>`);
+  const layerCard = card('Layer Summary', 'layer', null, null,
+    `<table class="kv">${kv([
+      ['Application Layer', app.application.name + ' — v' + app.application.app_version],
+      ['App Runtime', br.python ? br.python.version + ' (' + br.python.implementation + ')' : 'unknown'],
+      ['Buildpack', (br.buildpack.name || 'unknown') + ' — v' + (br.buildpack.version || 'unknown')],
+      ['Stack', os.stack || 'unknown'],
+      ['OS release', osRelease],
+      ['Stemcell Kernel', os.kernel + ' (' + os.arch + ')'],
+    ])}</table>`);
+  panels.push(`<div class="sec-group"><h2>${ICONS.layer}Summary</h2><div class="stack">${instCard + layerCard}</div></div>`);
 
   // ---- 2. Security (group) ----
   const secPanels = [];
@@ -902,12 +905,8 @@ function render(d) {
   secPanels.push(card('Application Layer', 'layer', 'v' + app.application.app_version, 'neutral',
     `<table class="kv">${kv([
       ['Application', app.application.name + ' — v' + app.application.app_version],
-      ['App ID', app.application.id],
       ['Routes', (app.application.uris || []).join(', ') || null],
-      ['Org / Space', app.application.organization ? app.application.organization + ' / ' + app.application.space : null],
-      ['CF API', app.application.cf_api],
       ['Process type', app.application.process_type],
-      ['Build ID', app.application.build_id],
       ['Git repository', rep.origin || null],
       ['Git commit', rep.commit || null],
       ['Working directory', app.working_directory],
@@ -948,7 +947,7 @@ function render(d) {
   let stackBody = `<table class="kv">${kv([
     ['Stack', os.stack],
     ['Distribution', os.distribution],
-    ['OS release', os.os_release ? (os.os_release.VERSION + ' (' + (os.os_release.ID || '') + ' ' + (os.os_release.ID_LIKE || '') + ')') : null],
+    ['OS release', osRelease],
     ['Kernel', os.kernel + ' (' + os.arch + ')'],
     ['glibc', os.glibc],
     ['Hardening', h ? h.summary.join(' · ') : null],
@@ -974,6 +973,9 @@ function render(d) {
     ['JWT subject', k8s.service_account.jwt_sub],
     ['K8s env vars', Object.keys(k8s.env).length ? Object.entries(k8s.env).map(([k, v]) => k + '=' + v).join('; ') : null],
     ['k8s-app-entrypoint', ct.k8s_entrypoint_config ? 'present' : null],
+    ['Org / Space', app.application.organization ? app.application.organization + ' / ' + app.application.space : null],
+    ['CF API', app.application.cf_api],
+    ['Build ID', app.application.build_id],
   ].concat(containerRows);
   let platBody, platTag, platCls;
   if (k8s.detected) {
@@ -989,8 +991,10 @@ function render(d) {
   } else {
     platBody = `<table class="kv">${kv([
       ['App ID', cf.application && cf.application.application_id],
+      ['Org / Space', app.application.organization ? app.application.organization + ' / ' + app.application.space : null],
       ['Uris', cf.application && (cf.application.application_uris || []).join(', ')],
-      ['Build', cf.application && cf.application.build],
+      ['CF API', app.application.cf_api],
+      ['Build ID', app.application.build_id],
       ['Services', cf.services.map(s => s.name + ' [' + s.label + ':' + s.plan + ']').join(', ') || null],
       ['Buildpack dep layers', cf.buildpack_dep_layers.map(l => l.layer + ' (' + l.tools.length + ' tools)').join('  ') || null],
     ].concat(containerRows))}</table>`;
