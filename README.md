@@ -63,8 +63,9 @@ cf push kirkware-py-inspector -f manifest.yml
 
 `manifests/` holds one manifest per deployment. Each runs **3 instances** at
 **128M** (the app idles ~25–35M RSS). `deploy.sh SPACE MANIFEST` targets the
-space, stamps the live git origin/commit, and pushes (app name = manifest
-basename). All six run concurrently, both spaces:
+space, stamps the live git origin/commit plus the manifest's stack and
+org-resolved buildpack name/version, and pushes (app name = manifest
+basename). All nine run concurrently, across all three spaces:
 
 | App | Space | Stack | Buildpack | Route |
 |---|---|---|---|---|
@@ -74,19 +75,29 @@ basename). All six run concurrently, both spaces:
 | `pyi-fs4-k8s` | cody-k8s (VKS) | cflinuxfs4 | python_buildpack (1.8.119) | pyi-fs4-k8s.apps.tanzu.kirkware.net |
 | `pyi-fs1-k8s` | cody-k8s (VKS) | tanzucflinuxfs1 | python_buildpack (1.8.119) | pyi-fs1-k8s.apps.tanzu.kirkware.net |
 | `pyi-fs4-old-k8s` | cody-k8s (VKS) | cflinuxfs4 | python_buildpack_1_8_102 | pyi-fs4-old-k8s.apps.tanzu.kirkware.net |
+| `pyi-fs4-oldstem` | cody-older-stemcell (VM) | cflinuxfs4 | python_buildpack (1.8.119) | pyi-fs4-oldstem.apps.tanzu.kirkware.net |
+| `pyi-fs1-oldstem` | cody-older-stemcell (VM) | tanzucflinuxfs1 | python_buildpack (1.8.119) | pyi-fs1-oldstem.apps.tanzu.kirkware.net |
+| `pyi-fs4-old-oldstem` | cody-older-stemcell (VM) | cflinuxfs4 | python_buildpack_1_8_102 | pyi-fs4-old-oldstem.apps.tanzu.kirkware.net |
 
 Note: `cflinuxfs4` = Ubuntu 22.04, `tanzucflinuxfs1` = Ubuntu 26.04 — the two
 `*-fs1*` apps run a materially newer root filesystem. `python_buildpack_1_8_102`
 is a version-pinned buildpack (the `*-fs4-old*` apps build against 1.8.102 while
-the rest use the current 1.8.119).
+the rest use the current 1.8.119). `cody-older-stemcell` runs on nodes with an
+older stemcell; its `-oldstem` apps compare node-age against `cody`'s.
+
+Development deployments (1 instance, `manifests/pyi-clarity-dev*.yml`):
+- `pyi-clarity-dev` in `cody` → pyi-clarity.apps.tanzu.kirkware.net
+- `pyi-clarity-dev-k8s` in `cody-k8s` → pyi-clarity-k8s.apps.tanzu.kirkware.net
 
 Test matrix used for this app:
 - VM-based Diego cells → org `kirkware-devs`, space `cody`
 - Kubernetes (VKS) → org `kirkware-devs`, space `cody-k8s`
+- Older-stemcell Diego cells → org `kirkware-devs`, space `cody-older-stemcell`
 - cf CLI against the Hub endpoint (`https://hub.tanzu.kirkware.net`)
-- `./deploy.sh [space]` targets the space and pushes, stamping the live
-  `remote.origin.url` + `HEAD` into the generated manifest so the running
-  app can report its repository and commit.
+- `./deploy.sh SPACE MANIFEST` targets the space and pushes, stamping the live
+  `remote.origin.url` + `HEAD` plus the manifest's `stack` and the org-resolved
+  buildpack name/version (from `cf buildpacks`) into the generated manifest so
+  the running app can report its repository, commit, buildpack, and stack.
 - Pushing to GitHub: `git push https://bkirkware:$BKIRKWARE_GIT_TOKEN@github.com/bkirkware/kirkware-py-inspector.git main`
   (the `KIRKWARE_GIT_TOKEN`/`kirkware` pair gets 403 on this repo).
 
