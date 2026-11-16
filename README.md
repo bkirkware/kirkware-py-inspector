@@ -2,22 +2,40 @@
 
 Infrastructure inspector: a small stdlib-only Python web app that reports
 everything it can observe about the environment it runs in — built to run on
-**both Cloud Foundry (python_buildpack) and Kubernetes**.
+**both Cloud Foundry (python_buildpack) and Kubernetes** (including
+CF-on-K8s / VKS, where both are detected and Kubernetes is labeled first).
 
 ## What it reports
 
-| Layer | Details |
-|---|---|
-| Runtime detection | CF (`VCAP_APPLICATION`, `/.cf`, `/home/vcap/deps`) vs K8s (service-account token, `KUBERNETES_SERVICE_HOST`) vs bare |
-| Cloud Foundry | app id/uris/version/build, bound services, buildpack dep layers + tools |
-| Kubernetes | API server, service account name/namespace, JWT subject/issuer, K8s env vars, kubelet mounts |
-| OS | distro from `/etc/os-release`, kernel, glibc, arch, CPU model/count, memory, disk usage |
-| Container | PID 1, cgroups, runtime markers (`/.cf`, `/.dockerenv`, `/.containerenv`, `/run/containerd`) |
-| Networking | per-interface MAC/MTU/state/IPv4, default route, routes, DNS, hostname resolution, listening sockets |
-| Versions | python (runtime, full build string, executable), pip, setuptools, cf CLI, node, java, git, go |
-| Environment | all env vars, secrets masked |
+UI sections, one panel per row:
 
-- **UI:** `GET /` — dark dashboard, one card per layer
+1. **Container Instance** — instance number, instance GUID, hostname,
+   internal/external IP, started-at + human-friendly uptime, PID 1, cgroup.
+2. **Security** — a group of five sub-panels:
+   - *Application Layer* — app name/version, app ID, routes, org/space,
+     CF API, process type, build ID, git repository origin + commit.
+   - *Application Dependencies* — every package in the app's environment
+     (direct vs transitive, with the requirement edges that pulled each in).
+   - *Buildpack (runtime)* — Python runtime (version, implementation,
+     executable, build string), pip/setuptools, buildpack dependency layers
+     and the tools each provides.
+   - *Stack (root filesystem)* — distribution, OS release, CF stack, kernel,
+     glibc, CPU/memory/disk, container hardening posture (seccomp,
+     NoNewPrivs, capabilities, AppArmor visibility). Stemcell is a node-level
+     fact and is not observable from inside the container — the panel says so.
+   - *Container platform* — Cloud Foundry (app id, uris, build, services,
+     buildpack layers) and/or Kubernetes (API server, service account,
+     namespace, JWT claims, k8s-app-entrypoint config). On CF-on-K8s the
+     Kubernetes facts lead and the CF overlay is shown in a collapsible.
+3. **Networking** — hostname + resolution, default route, DNS, listening
+   sockets, per-interface detail (MAC/MTU/state/addresses), routes.
+4. **Environment Variables** — all env vars, secrets masked.
+
+The header shows the detected container platform (Kubernetes wins over
+Cloud Foundry when both are present) with a matching badge, and app
+uptime in human form (e.g. `2d 3h 14m`).
+
+- **UI:** `GET /` — dark dashboard, "Runtime Inspector"
 - **API:** `GET /api/info` — full JSON
 - **Health:** `GET /healthz`
 
@@ -36,9 +54,19 @@ python3 main.py          # PORT env honored (default 8080)
 cf push kirkware-py-inspector -f manifest.yml
 ```
 
+Test matrix used for this app:
+- VM-based Diego cells → org `kirkware-devs`, space `cody`
+- Kubernetes (VKS) → org `kirkware-devs`, space `cody-k8s`
+- cf CLI against the Hub endpoint (`https://hub.tanzu.kirkware.net`)
+
 ## Deploy to Kubernetes
 
 Any image that runs `python3 main.py` (or just a slim python image plus the
 file). The app reads `$PORT` (default 8080); a Service exposing that port is
 all it needs. K8s specifics are read from the service-account mount and
 environment, so a default ServiceAccount is enough for the basic report.
+
+## Versioning
+
+Patch (third octet) increments ship with each change; minor/major only when
+instructed. Current: see `APP_VERSION` in `main.py` and the package version.
