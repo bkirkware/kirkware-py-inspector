@@ -1,0 +1,19 @@
+---
+# pyi-fs4-old-k8s — python_buildpack_1_8_102 on cflinuxfs4 (cody-k8s)
+# Route: pyi-fs4-old-k8s.apps.tanzu.kirkware.net
+applications:
+- name: pyi-fs4-old-k8s
+  memory: 128M
+  disk_quota: 1G
+  instances: 3
+  stack: cflinuxfs4
+  buildpacks:
+    - python_buildpack_1_8_102
+  command: python3 main.py
+  routes:
+    - route: pyi-fs4-old-k8s.apps.tanzu.kirkware.net
+  # Where this app is stored. CF droplets drop .git, so the app reads these
+  # from the environment; deploy.sh stamps the live values at push time.
+  env:
+    GIT_REPO_URL: "https://github.com/bkirkware/kirkware-py-inspector.git"
+    GIT_COMMIT: "unknown"
