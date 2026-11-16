@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_NAME = "kirkware-py-inspector"
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 START_TIME = time.time()
 HOST = os.environ.get("BIND", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -797,6 +797,8 @@ PAGE = """<!doctype html>
   .hero-sub { font-size: 13px; color: var(--cds-color-construction-600);
               font-family: var(--cds-font-mono); word-break: break-all; margin-top: 2px; }
   .hero table.kv { margin: 0; border: 1px solid var(--cds-alias-border-subtle); border-radius: var(--cds-alias-border-radius); }
+  /* Started/Uptime: key column minimal, values take the rest */
+  .hero table.kv td.k { width: 1%; white-space: nowrap; }
 
   /* ---- security group heading (Clarity section type: 20px/1.2em, 500) ---- */
   .sec-group { margin-top: var(--cds-global-space-3); }
