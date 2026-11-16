@@ -59,6 +59,27 @@ python3 main.py          # PORT env honored (default 8080)
 cf push kirkware-py-inspector -f manifest.yml
 ```
 
+## Deployment matrix (concurrent)
+
+`manifests/` holds one manifest per deployment. Each runs **3 instances** at
+**128M** (the app idles ~25–35M RSS). `deploy.sh SPACE MANIFEST` targets the
+space, stamps the live git origin/commit, and pushes (app name = manifest
+basename). All six run concurrently, both spaces:
+
+| App | Space | Stack | Buildpack | Route |
+|---|---|---|---|---|
+| `pyi-fs4` | cody (VM) | cflinuxfs4 | python_buildpack (1.8.119) | pyi-fs4.apps.tanzu.kirkware.net |
+| `pyi-fs1` | cody (VM) | tanzucflinuxfs1 | python_buildpack (1.8.119) | pyi-fs1.apps.tanzu.kirkware.net |
+| `pyi-fs4-old` | cody (VM) | cflinuxfs4 | python_buildpack_1_8_102 | pyi-fs4-old.apps.tanzu.kirkware.net |
+| `pyi-fs4-k8s` | cody-k8s (VKS) | cflinuxfs4 | python_buildpack (1.8.119) | pyi-fs4-k8s.apps.tanzu.kirkware.net |
+| `pyi-fs1-k8s` | cody-k8s (VKS) | tanzucflinuxfs1 | python_buildpack (1.8.119) | pyi-fs1-k8s.apps.tanzu.kirkware.net |
+| `pyi-fs4-old-k8s` | cody-k8s (VKS) | cflinuxfs4 | python_buildpack_1_8_102 | pyi-fs4-old-k8s.apps.tanzu.kirkware.net |
+
+Note: `cflinuxfs4` = Ubuntu 22.04, `tanzucflinuxfs1` = Ubuntu 26.04 — the two
+`*-fs1*` apps run a materially newer root filesystem. `python_buildpack_1_8_102`
+is a version-pinned buildpack (the `*-fs4-old*` apps build against 1.8.102 while
+the rest use the current 1.8.119).
+
 Test matrix used for this app:
 - VM-based Diego cells → org `kirkware-devs`, space `cody`
 - Kubernetes (VKS) → org `kirkware-devs`, space `cody-k8s`
