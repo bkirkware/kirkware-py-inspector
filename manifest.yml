@@ -3,7 +3,7 @@ applications:
 - name: kirkware-py-inspector
   memory: 256M
   disk_quota: 1G
-  instances: 1
+  instances: 3
   stack: cflinuxfs4
   buildpacks:
     - python_buildpack
