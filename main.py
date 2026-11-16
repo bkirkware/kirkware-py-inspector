@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_NAME = "kirkware-py-inspector"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 START_TIME = time.time()
 HOST = os.environ.get("BIND", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -651,90 +651,168 @@ PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Runtime Inspector</title>
 <style>
+  /* ---- Clarity design tokens (vmware-clarity/core, light theme) ----------
+     Colors converted from the token HSL values in projects/core/build/tokens.ts
+     (construction 25..1100, blue/green/ochre/red status families). Spacing
+     from the component space scale (base 20px, 1 unit = 1px). */
   :root {
-    --bg: #0d1117; --panel: #161b22; --panel2: #1c2330;
-    --border: #2d333b; --text: #e6edf3; --dim: #8b949e;
-    --accent: #58a6ff; --ok: #3fb950; --warn: #d29922;
-    --k8s: #64b5f6; --cf: #ffd358; --py: #6fa8dc; --ubuntu: #e95420;
-    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --cds-global-space-3: 4px; --cds-global-space-4: 6px; --cds-global-space-5: 8px;
+    --cds-global-space-6: 12px; --cds-global-space-7: 16px; --cds-global-space-8: 18px;
+    --cds-global-space-9: 24px; --cds-global-space-10: 32px; --cds-global-space-12: 48px;
+    --cds-color-blue-50: #e5f7ff; --cds-color-blue-100: #bdebff; --cds-color-blue-700: #0079ad;
+    --cds-color-blue-800: #00608a; --cds-color-blue-900: #004b6b;
+    --cds-color-green-50: #eefce3; --cds-color-green-700: #42810e; --cds-color-green-800: #366a0c;
+    --cds-color-ochre-50: #fff9eb; --cds-color-ochre-100: #fff2d6; --cds-color-ochre-500: #ffb92e;
+    --cds-color-ochre-800: #a36500;
+    --cds-color-red-50: #fff2f0; --cds-color-red-700: #e02200;
+    --cds-color-construction-25: #fcfdfd; --cds-color-construction-50: #f1f6f8;
+    --cds-color-construction-100: #e3eaed; --cds-color-construction-200: #cbd4d8;
+    --cds-color-construction-300: #aeb8bc; --cds-color-construction-400: #859399;
+    --cds-color-construction-500: #6a7a81; --cds-color-construction-600: #4f6169;
+    --cds-color-construction-700: #3a4d55; --cds-color-construction-800: #2d4048;
+    --cds-color-construction-900: #21333b; --cds-color-construction-1000: #1b2b32;
+    --cds-color-k8s: #326CE5; --cds-color-cf: #0C9ED5;
+    --cds-alias-object-background: var(--cds-color-construction-25);
+    --cds-alias-container-background: #ffffff;
+    --cds-alias-border-color: var(--cds-color-construction-200);
+    --cds-alias-border-subtle: var(--cds-color-construction-100);
+    --cds-alias-border-radius: 4px;
+    --cds-alias-shadow: 0 1px 3px 0 hsla(198, 30%, 15%, 0.5);
+    --cds-alias-status-info: var(--cds-color-blue-700);
+    --cds-alias-status-info-tint: var(--cds-color-blue-50);
+    --cds-alias-status-success: var(--cds-color-green-700);
+    --cds-alias-status-success-tint: var(--cds-color-green-50);
+    --cds-alias-status-warning-tint: var(--cds-color-ochre-50);
+    --cds-alias-status-neutral: var(--cds-color-construction-600);
+    --cds-alias-status-neutral-tint: var(--cds-color-construction-50);
+    --cds-font: 'Clarity City', 'Avenir Next', 'Segoe UI', Helvetica, Arial, sans-serif;
+    --cds-font-mono: ui-monospace, Consolas, Menlo, Monaco, monospace;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text);
-         font: 14px/1.5 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-  header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center;
-           gap: 14px; padding: 14px 24px; background: rgba(13,17,23,.92);
-           backdrop-filter: blur(6px); border-bottom: 1px solid var(--border); }
-  header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .2px; }
-  header h1 .ver { color: var(--dim); font-weight: 400; font-size: 12px; margin-left: 8px; }
-  .badge { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
-           border: 1px solid var(--border); display: inline-flex; align-items: center; gap: 6px; }
-  .badge.cf { color: var(--cf); border-color: var(--cf); }
-  .badge.k8s { color: var(--k8s); border-color: var(--k8s); }
-  .badge.other { color: var(--dim); }
+  body { margin: 0; background: var(--cds-alias-object-background); color: #000;
+         font: 400 14px/1.4285714em var(--cds-font); }
+  a { color: var(--cds-alias-status-info); text-decoration: none; }
+  a:hover { color: var(--cds-color-blue-800); text-decoration: underline; }
+
+  /* ---- app header (dark slate, VMware app-bar style) ---- */
+  header.app { position: sticky; top: 0; z-index: 5; display: flex; align-items: center;
+               gap: 16px; padding: 0 var(--cds-global-space-9); height: 48px;
+               background: var(--cds-color-construction-1000); }
+  .brand { display: flex; align-items: center; gap: 10px; color: #fff;
+           font-size: 16px; font-weight: 500; letter-spacing: -0.0125em; }
+  .brand .icon { width: 22px; height: 22px; }
+  .ver { font-size: 11px; font-weight: 500; letter-spacing: 0.05em;
+         color: var(--cds-color-construction-300); }
   .spacer { flex: 1; }
-  button { background: var(--panel2); color: var(--text); border: 1px solid var(--border);
-           border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
-  button:hover { border-color: var(--accent); }
-  main { max-width: 960px; margin: 0 auto; padding: 24px; }
-  .stack { display: grid; grid-template-columns: 1fr; gap: 16px; }
-  section.card { background: var(--panel); border: 1px solid var(--border);
-                 border-radius: 10px; overflow: hidden; }
-  section.card > h2 { margin: 0; padding: 12px 16px; font-size: 13px; font-weight: 600;
-                      text-transform: uppercase; letter-spacing: .8px; color: var(--dim);
-                      border-bottom: 1px solid var(--border);
+  button.btn { font: 500 13px/1 var(--cds-font); padding: 7px 12px; border-radius: var(--cds-alias-border-radius);
+               cursor: pointer; border: 1px solid transparent; }
+  button.btn.ghost { background: transparent; color: #fff; border-color: rgba(255,255,255,.4); }
+  button.btn.ghost:hover { background: rgba(255,255,255,.12); border-color: rgba(255,255,255,.7); }
+  button.btn.primary { background: var(--cds-color-blue-700); color: #fff; }
+  button.btn.primary:hover { background: var(--cds-color-blue-800); }
+
+  /* ---- content ---- */
+  main { max-width: 1080px; margin: 0 auto; padding: var(--cds-global-space-9); }
+  .crumbs { font-size: 13px; color: var(--cds-color-construction-500); margin-bottom: var(--cds-global-space-7); }
+  .crumbs .here { color: var(--cds-color-construction-700); font-weight: 500; }
+  .stack { display: grid; grid-template-columns: 1fr; gap: var(--cds-global-space-7); }
+
+  /* ---- Clarity card ---- */
+  section.card { background: var(--cds-alias-container-background);
+                 border: 1px solid var(--cds-alias-border-color);
+                 border-radius: var(--cds-alias-border-radius);
+                 box-shadow: var(--cds-alias-shadow); overflow: hidden; }
+  section.card > h2 { margin: 0; padding: 12px var(--cds-global-space-8); font-size: 16px;
+                      font-weight: 500; letter-spacing: -0.0125em;
+                      border-bottom: 1px solid var(--cds-alias-border-subtle);
                       display: flex; gap: 10px; align-items: center; }
-  section.card > h2 .title { display: flex; gap: 8px; align-items: center;
-                             text-transform: none; letter-spacing: .2px; }
-  section.card > h2 .pill { margin-left: auto; font-size: 11px; color: var(--ok);
-                            text-transform: none; letter-spacing: 0; }
-  .icon { width: 18px; height: 18px; flex: none; display: block; }
-  .icon text { font-family: var(--mono); font-weight: 700; }
-  .group { border: 1px solid var(--border); border-radius: 12px; padding: 14px;
-           background: rgba(28,35,48,.35); }
-  .group > h2 { margin: 0 0 12px; padding: 0; font-size: 15px; font-weight: 700;
-                display: flex; gap: 10px; align-items: center; }
-  .group .stack { gap: 12px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  td, th { padding: 7px 16px; text-align: left; vertical-align: top;
-           border-bottom: 1px solid rgba(45,51,59,.5); }
-  tr:last-child td { border-bottom: none; }
-  td.k { color: var(--dim); white-space: nowrap; width: 34%; }
-  td.v { font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
-  pre { margin: 0; padding: 12px 16px; overflow-x: auto; font: 12px/1.5 var(--mono);
-        white-space: pre-wrap; word-break: break-all; }
-  .hint { color: var(--dim); font-size: 12px; padding: 10px 16px; cursor: pointer; }
-  details[open] .hint { border-bottom: 1px solid var(--border); }
-  .muted { color: var(--dim); }
-  .pkg { display: flex; gap: 10px; align-items: baseline; padding: 6px 16px;
-         border-bottom: 1px solid rgba(45,51,59,.5); font-size: 13px; }
+  section.card > h2 .title { display: flex; gap: 10px; align-items: center; }
+  .icon { width: 20px; height: 20px; flex: none; display: block; }
+
+  /* ---- Clarity tag (pill) ---- */
+  .tag { margin-left: auto; font-size: 11px; font-weight: 500; letter-spacing: 0.05em;
+         padding: 3px 8px; border-radius: var(--cds-alias-border-radius); white-space: nowrap;
+         display: inline-flex; align-items: center; gap: 5px; }
+  .tag .icon { width: 13px; height: 13px; }
+  .tag.info   { background: var(--cds-alias-status-info-tint); color: var(--cds-alias-status-info); }
+  .tag.success{ background: var(--cds-alias-status-success-tint); color: var(--cds-alias-status-success); }
+  .tag.warning{ background: var(--cds-alias-status-warning-tint); color: var(--cds-color-ochre-800); }
+  .tag.neutral{ background: var(--cds-alias-status-neutral-tint); color: var(--cds-alias-status-neutral); }
+  .tag.k8s    { background: #e9effd; color: var(--cds-color-k8s); }
+
+  /* ---- key/value table (Clarity detail rows) ---- */
+  table.kv { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.kv td { padding: 7px var(--cds-global-space-8); vertical-align: top;
+                border-bottom: 1px solid var(--cds-alias-border-subtle); }
+  table.kv tr:last-child td { border-bottom: none; }
+  table.kv tr:hover td { background: var(--cds-color-construction-50); }
+  td.k { width: 240px; color: var(--cds-color-construction-600); }
+  td.v { font-family: var(--cds-font-mono); font-size: 12.5px; word-break: break-all; color: #000; }
+  .muted { color: var(--cds-color-construction-400); }
+
+  /* ---- Clarity accordion (pull-downs) ---- */
+  .acc { border-top: 1px solid var(--cds-alias-border-subtle); }
+  .acc-hd { width: 100%; display: flex; align-items: center; gap: 8px; padding: 8px var(--cds-global-space-8);
+            background: none; border: none; cursor: pointer; font: 500 13px/1.4 var(--cds-font);
+            color: var(--cds-alias-status-info); text-align: left; }
+  .acc-hd:hover { background: var(--cds-color-construction-50); }
+  .acc-caret { display: inline-block; font-size: 10px; transition: transform 0.15s; }
+  .acc.open .acc-caret { transform: rotate(90deg); }
+  .acc-bd { display: none; padding: 0 0 8px; }
+  .acc.open .acc-bd { display: block; }
+
+  pre { margin: 8px var(--cds-global-space-8) 16px; padding: 12px 16px; overflow-x: auto;
+        background: var(--cds-color-construction-50); border: 1px solid var(--cds-alias-border-subtle);
+        border-radius: var(--cds-alias-border-radius);
+        font: 12px/1.5 var(--cds-font-mono); white-space: pre-wrap; word-break: break-all; }
+  .acc pre { margin-left: var(--cds-global-space-8); margin-right: var(--cds-global-space-8); }
+
+  /* ---- package list (dependencies) ---- */
+  .pkg { display: flex; gap: 10px; align-items: baseline; padding: 7px var(--cds-global-space-8);
+         border-bottom: 1px solid var(--cds-alias-border-subtle); font-size: 13px; }
   .pkg:last-child { border-bottom: none; }
-  .pkg .pname { font-weight: 600; font-family: var(--mono); font-size: 12.5px; }
-  .pkg .pver { font-family: var(--mono); font-size: 12px; color: var(--dim); }
-  .inst-hero { display: flex; align-items: center; gap: 18px; padding: 20px 22px 16px;
-               background: linear-gradient(135deg, rgba(88,166,255,.10), rgba(88,166,255,.02));
-               border-bottom: 1px solid var(--border); }
-  .inst-hero .icon { width: 46px; height: 46px; }
-  .inst-hero-num { font: 800 56px/.9 var(--mono); color: var(--accent); letter-spacing: -1px;
-                  text-shadow: 0 0 24px rgba(88,166,255,.45); }
-  .inst-hero-meta { color: var(--dim); font-size: 12px; font-family: var(--mono);
-                    margin-top: 4px; word-break: break-all; }
-  .tag { font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 999px;
-         border: 1px solid var(--border); color: var(--dim); letter-spacing: .5px; }
-  .tag.direct { color: var(--ok); border-color: var(--ok); }
-  footer { text-align: center; color: var(--dim); font-size: 12px; padding: 24px; }
+  .pkg:hover { background: var(--cds-color-construction-50); }
+  .pkg .pname { font-weight: 500; }
+  .pkg .pver { font-family: var(--cds-font-mono); font-size: 12px; color: var(--cds-color-construction-600); }
+  .pkg .reqs { font-size: 11px; color: var(--cds-color-construction-400); }
+  .pkg .tag { margin-left: 0; }
+
+  /* ---- instance hero (Clarity display type: 40px/1.1em, 500) ---- */
+  .hero { display: grid; grid-template-columns: auto 1fr; gap: var(--cds-global-space-10);
+          padding: var(--cds-global-space-8) var(--cds-global-space-8) var(--cds-global-space-6); }
+  .hero-label { font-size: 11px; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase;
+                color: var(--cds-color-construction-500); }
+  .hero-num { font-size: 40px; font-weight: 500; line-height: 1.1em; letter-spacing: -0.0125em;
+              color: var(--cds-color-construction-900); font-family: var(--cds-font-mono); }
+  .hero-sub { font-size: 13px; color: var(--cds-color-construction-600);
+              font-family: var(--cds-font-mono); word-break: break-all; margin-top: 2px; }
+  .hero table.kv { margin: 0; border: 1px solid var(--cds-alias-border-subtle); border-radius: var(--cds-alias-border-radius); }
+
+  /* ---- security group heading (Clarity section type: 20px/1.2em, 500) ---- */
+  .sec-group { margin-top: var(--cds-global-space-3); }
+  .sec-group > h2 { display: flex; align-items: center; gap: 10px; margin: 0 0 var(--cds-global-space-7);
+                    font-size: 20px; font-weight: 500; letter-spacing: -0.01em;
+                    color: var(--cds-color-construction-900); }
+
+  footer { text-align: center; color: var(--cds-color-construction-500); font-size: 12px;
+           padding: var(--cds-global-space-10) 24px; }
+  @media (max-width: 700px) { .hero { grid-template-columns: 1fr; } td.k { width: 38%; } }
 </style>
 </head>
 <body>
-<header>
-  <h1>Runtime Inspector<span class="ver" id="ver"></span></h1>
-  <span class="badge" id="runtime">…</span>
+<header class="app">
+  <div class="brand"><span class="mark" id="brandicon"></span>Runtime Inspector<span class="ver" id="ver"></span></div>
   <span class="spacer"></span>
-  <button onclick="load()">↻ Refresh</button>
-  <button onclick="copyJson()">Copy JSON</button>
-  <button onclick="window.location='/api/info'">Download JSON</button>
+  <span class="tag" id="runtime">…</span>
+  <button class="btn ghost" onclick="load()">↻ Refresh</button>
+  <button class="btn ghost" onclick="copyJson()">Copy JSON</button>
+  <button class="btn primary" onclick="window.location='/api/info'">Download JSON</button>
 </header>
-<main class="stack" id="grid"><div class="hint">Loading infrastructure data…</div></main>
-<footer>collected live from the process environment · no external calls · secrets masked</footer>
+<main>
+  <nav class="crumbs"><a href="#">Home</a><span> / </span><span class="here">Runtime Inspector</span></nav>
+  <div class="stack" id="grid"><div class="muted" style="padding:24px">Loading infrastructure data…</div></div>
+</main>
+<footer>collected live from the process environment · no external calls · secrets masked · design: VMware Clarity (light)</footer>
 <script>
 let DATA = null;
 const esc = s => String(s ?? "—").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -742,110 +820,116 @@ const kv = (rows) => rows.map(([k, v]) =>
   `<tr><td class="k">${esc(k)}</td><td class="v">${v === null || v === undefined || v === '' ? '<span class="muted">not detected</span>' : esc(v)}</td></tr>`).join('');
 
 // ---- SVG icons -------------------------------------------------------------
-// Kubernetes + Cloud Foundry: official brand marks from Simple Icons (CC0),
-// 24×24 filled paths, official brand colors. Others: simple strokes.
+// Kubernetes + Cloud Foundry: official brand marks (Simple Icons, CC0).
 const ICONS = {
-  // Official Kubernetes mark (Simple Icons, CC0) — helmsman wheel in heptagon.
   k8s: '<svg class="icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="#326CE5"><path d="M10.204 14.35l.007.01-.999 2.413a5.171 5.171 0 0 1-2.075-2.597l2.578-.437.004.005a.44.44 0 0 1 .484.606zm-.833-2.129a.44.44 0 0 0 .173-.756l.002-.011L7.585 9.7a5.143 5.143 0 0 0-.73 3.255l2.514-.725.002-.009zm1.145-1.98a.44.44 0 0 0 .699-.337l.01-.005.15-2.62a5.144 5.144 0 0 0-3.01 1.442l2.147 1.523.004-.002zm.76 2.75l.723.349.722-.347.18-.78-.5-.623h-.804l-.5.623.179.779zm1.5-3.095a.44.44 0 0 0 .7.336l.008.003 2.134-1.513a5.188 5.188 0 0 0-2.992-1.442l.148 2.615.002.001zm10.876 5.97l-5.773 7.181a1.6 1.6 0 0 1-1.248.594l-9.261.003a1.6 1.6 0 0 1-1.247-.596l-5.776-7.18a1.583 1.583 0 0 1-.307-1.34L2.1 5.573c.108-.47.425-.864.863-1.073L11.305.513a1.606 1.606 0 0 1 1.385 0l8.345 3.985c.438.209.755.604.863 1.073l2.062 8.955c.108.47-.005.963-.308 1.34zm-3.289-2.057c-.042-.01-.103-.026-.145-.034-.174-.033-.315-.025-.479-.038-.35-.037-.638-.067-.895-.148-.105-.04-.18-.165-.216-.216l-.201-.059a6.45 6.45 0 0 0-.105-2.332 6.465 6.465 0 0 0-.936-2.163c.052-.047.15-.133.177-.159.008-.09.001-.183.094-.282.197-.185.444-.338.743-.522.142-.084.273-.137.415-.242.032-.024.076-.062.11-.089.24-.191.295-.52.123-.736-.172-.216-.506-.236-.745-.045-.034.027-.08.062-.111.088-.134.116-.217.23-.33.35-.246.25-.45.458-.673.609-.097.056-.239.037-.303.033l-.19.135a6.545 6.545 0 0 0-4.146-2.003l-.012-.223c-.065-.062-.143-.115-.163-.25-.022-.268.015-.557.057-.905.023-.163.061-.298.068-.475.001-.04-.001-.099-.001-.142 0-.306-.224-.555-.5-.555-.275 0-.499.249-.499.555l.001.014c0 .041-.002.092 0 .128.006.177.044.312.067.475.042.348.078.637.056.906a.545.545 0 0 1-.162.258l-.012.211a6.424 6.424 0 0 0-4.166 2.003 8.373 8.373 0 0 1-.18-.128c-.09.012-.18.04-.297-.029-.223-.15-.427-.358-.673-.608-.113-.12-.195-.234-.329-.349-.03-.026-.077-.062-.111-.088a.594.594 0 0 0-.348-.132.481.481 0 0 0-.398.176c-.172.216-.117.546.123.737l.007.005.104.083c.142.105.272.159.414.242.299.185.546.338.743.522.076.082.09.226.1.288l.16.143a6.462 6.462 0 0 0-1.02 4.506l-.208.06c-.055.072-.133.184-.215.217-.257.081-.546.11-.895.147-.164.014-.305.006-.48.039-.037.007-.09.02-.133.03l-.004.002-.007.002c-.295.071-.484.342-.423.608.061.267.349.429.645.365l.007-.001.01-.003.129-.029c.17-.046.294-.113.448-.172.33-.118.604-.217.87-.256.112-.009.23.069.288.101l.217-.037a6.5 6.5 0 0 0 2.88 3.596l-.09.218c.033.084.069.199.044.282-.097.252-.263.517-.452.813-.091.136-.185.242-.268.399-.02.037-.045.095-.064.134-.128.275-.034.591.213.71.248.12.556-.007.69-.282v-.002c.02-.039.046-.09.062-.127.07-.162.094-.301.144-.458.132-.332.205-.68.387-.897.05-.06.13-.082.215-.105l.113-.205a6.453 6.453 0 0 0 4.609.012l.106.192c.086.028.18.042.256.155.136.232.229.507.342.84.05.156.074.295.145.457.016.037.043.09.062.129.133.276.442.402.69.282.247-.118.341-.435.213-.71-.02-.039-.045-.096-.065-.134-.083-.156-.177-.261-.268-.398-.19-.296-.346-.541-.443-.793-.04-.13.007-.21.038-.294-.018-.022-.059-.144-.083-.202a6.499 6.499 0 0 0 2.88-3.622c.064.01.176.03.213.038.075-.05.144-.114.28-.104.266.039.54.138.87.256.154.06.277.128.448.173.036.01.088.019.13.028l.009.003.007.001c.297.064.584-.098.645-.365.06-.266-.128-.537-.423-.608zM16.4 9.701l-1.95 1.746v.005a.44.44 0 0 0 .173.757l.003.01 2.526.728a5.199 5.199 0 0 0-.108-1.674A5.208 5.208 0 0 0 16.4 9.7zm-4.013 5.325a.437.437 0 0 0-.404-.232.44.44 0 0 0-.372.233h-.002l-1.268 2.292a5.164 5.164 0 0 0 3.326.003l-1.27-2.296h-.01zm1.888-1.293a.44.44 0 0 0-.27.036.44.44 0 0 0-.214.572l-.003.004 1.01 2.438a5.15 5.15 0 0 0 2.081-2.615l-2.6-.44-.004.005z"/></svg>',
-  // Official Cloud Foundry mark (Simple Icons, CC0) — the "C" in a ring.
   cf: '<svg class="icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="#0C9ED5"><path d="M12.854 13.537c-.048 1.79.074 3.862.149 4.917.96.136 1.633.456 1.633.83 0 .497-1.193 1.07-2.665 1.07s-2.665-.573-2.665-1.07c0-.374.673-.694 1.633-.83.075-1.055.197-3.127.15-4.917-.044-1.613-.779-3.091-1.676-3.821-.725-.59-1.174-1.427-1.166-2.354.016-1.765 1.683-3.186 3.724-3.186s3.708 1.42 3.723 3.186c.008.927-.44 1.763-1.165 2.354-.897.73-1.632 2.208-1.675 3.821zm6.214 6.596c.287-.115.612-.177.951-.19-.007-.24-.166-.672-.303-.877-.56-.1-1.276-.313-1.658-.682a.48.48 0 0 1-.186-.41c.026-.146.133-.253.278-.329a8.115 8.115 0 0 0-1.08-.515 4.6 4.6 0 0 1-1.697-.124c-.303-.09-.764-.24-.82-.549-.16-.03-.54-.083-.766-.112a4.048 4.048 0 0 0-.07.31.815.815 0 0 0 .56.956c1 .291 1.756.77 1.974 1.359.44 1.19-1.413 2.353-4.231 2.353-2.82 0-4.673-1.163-4.233-2.353.213-.574.94-1.044 1.903-1.337a.863.863 0 0 0 .589-1.005l-.06-.283c-.291.03-.779.101-1.031.148-.019.313-.476.466-.76.564a4.65 4.65 0 0 1-1.708.147 7.82 7.82 0 0 0-1.052.535c.544.23.316.736-.09.97-.407.253-.842.409-1.38.51-.051.088-.111.298-.163.438-.016.136-.063.367-.053.459.645.02 1.268.152 1.62.605.281.508-.024.976-.51 1.364.392.316.986.673 1.45.868a4.82 4.82 0 0 1 2.715-.269c.718.16 1.506.581 1.742 1.289.635.042 1.895.04 2.528-.041.182-.731.907-1.147 1.606-1.326a4.803 4.803 0 0 1 2.712.193c.356-.18 1.03-.602 1.306-.9-.474-.358-.873-.794-.63-1.325.085-.19.301-.33.547-.44zm-9.54-5.848s.418-1.586-1.4-3.632A4.99 4.99 0 0 1 6.88 7.346a5.05 5.05 0 0 1 5.047-5.04c2.822-.065 5.168 2.218 5.164 5.04a4.984 4.984 0 0 1-1.248 3.306c-1.614 1.616-1.4 3.633-1.4 3.633a7.352 7.352 0 0 0 4.956-6.898c.035-4.021-3.39-7.47-7.414-7.385-4.027-.083-7.447 3.364-7.413 7.385a7.352 7.352 0 0 0 4.956 6.898z"/></svg>',
-  python: '<svg class="icon" viewBox="0 0 20 20"><ellipse cx="10" cy="10" rx="8.4" ry="5.6" fill="none" stroke="#6fa8dc" stroke-width="1.3" transform="rotate(-24 10 10)"/><ellipse cx="10" cy="10" rx="8.4" ry="5.6" fill="none" stroke="#6fa8dc" stroke-width="1.3" transform="rotate(24 10 10)"/></svg>',
+  python: '<svg class="icon" viewBox="0 0 20 20"><ellipse cx="10" cy="10" rx="8.4" ry="5.6" fill="none" stroke="#3776ab" stroke-width="1.3" transform="rotate(-24 10 10)"/><ellipse cx="10" cy="10" rx="8.4" ry="5.6" fill="none" stroke="#3776ab" stroke-width="1.3" transform="rotate(24 10 10)"/></svg>',
   ubuntu: '<svg class="icon" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8" fill="none" stroke="#e95420" stroke-width="1.4"/><circle cx="10" cy="4.6" r="1.7" fill="#e95420"/><circle cx="5.3" cy="13" r="1.7" fill="#e95420"/><circle cx="14.7" cy="13" r="1.7" fill="#e95420"/></svg>',
-  shield: '<svg class="icon" viewBox="0 0 20 20"><path d="M10 1.5 L16.5 4 V9.5 C16.5 13.8 13.7 16.9 10 18.5 C6.3 16.9 3.5 13.8 3.5 9.5 V4 Z" fill="none" stroke="#8b949e" stroke-width="1.4"/><text x="10" y="13" font-size="7" fill="#8b949e" text-anchor="middle">S</text></svg>',
-  box: '<svg class="icon" viewBox="0 0 20 20"><rect x="2.5" y="2.5" width="15" height="15" rx="2.5" fill="none" stroke="#58a6ff" stroke-width="1.4"/><path d="M2.5 8 H17.5" stroke="#58a6ff" stroke-width="1.1"/><circle cx="5.2" cy="5.2" r=".9" fill="#58a6ff"/><circle cx="7.6" cy="5.2" r=".9" fill="#58a6ff"/></svg>',
-  net: '<svg class="icon" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8" fill="none" stroke="#58a6ff" stroke-width="1.3"/><ellipse cx="10" cy="10" rx="3.6" ry="8" fill="none" stroke="#58a6ff" stroke-width="1.1"/><line x1="2" y1="10" x2="18" y2="10" stroke="#58a6ff" stroke-width="1.1"/><line x1="3.4" y1="6" x2="16.6" y2="6" stroke="#58a6ff" stroke-width="1.1"/><line x1="3.4" y1="14" x2="16.6" y2="14" stroke="#58a6ff" stroke-width="1.1"/></svg>',
-  layer: '<svg class="icon" viewBox="0 0 20 20"><path d="M10 2.5 L17.5 6.5 L10 10.5 L2.5 6.5 Z" fill="none" stroke="#8b949e" stroke-width="1.3"/><path d="M2.5 10 L10 14 L17.5 10" fill="none" stroke="#8b949e" stroke-width="1.3"/><path d="M2.5 13.5 L10 17.5 L17.5 13.5" fill="none" stroke="#8b949e" stroke-width="1.3"/></svg>',
+  shield: '<svg class="icon" viewBox="0 0 20 20"><path d="M10 1.5 L16.5 4 V9.5 C16.5 13.8 13.7 16.9 10 18.5 C6.3 16.9 3.5 13.8 3.5 9.5 V4 Z" fill="none" stroke="#4f6169" stroke-width="1.4"/></svg>',
+  box: '<svg class="icon" viewBox="0 0 20 20"><rect x="2.5" y="2.5" width="15" height="15" rx="2" fill="none" stroke="#4f6169" stroke-width="1.4"/><path d="M2.5 8 H17.5" stroke="#4f6169" stroke-width="1.1"/><circle cx="5.2" cy="5.2" r=".9" fill="#4f6169"/><circle cx="7.6" cy="5.2" r=".9" fill="#4f6169"/></svg>',
+  net: '<svg class="icon" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8" fill="none" stroke="#4f6169" stroke-width="1.3"/><ellipse cx="10" cy="10" rx="3.6" ry="8" fill="none" stroke="#4f6169" stroke-width="1.1"/><line x1="2" y1="10" x2="18" y2="10" stroke="#4f6169" stroke-width="1.1"/><line x1="3.4" y1="6" x2="16.6" y2="6" stroke="#4f6169" stroke-width="1.1"/><line x1="3.4" y1="14" x2="16.6" y2="14" stroke="#4f6169" stroke-width="1.1"/></svg>',
+  layer: '<svg class="icon" viewBox="0 0 20 20"><path d="M10 2.5 L17.5 6.5 L10 10.5 L2.5 6.5 Z" fill="none" stroke="#4f6169" stroke-width="1.3"/><path d="M2.5 10 L10 14 L17.5 10" fill="none" stroke="#4f6169" stroke-width="1.3"/><path d="M2.5 13.5 L10 17.5 L17.5 13.5" fill="none" stroke="#4f6169" stroke-width="1.3"/></svg>',
 };
 
-function card(title, icon, pill, body) {
-  return `<section class="card"><h2><span class="title">${ICONS[icon] || ''}${esc(title)}</span>${pill ? `<span class="pill">${pill}</span>` : ''}</h2>${body}</section>`;
+function tag(text, cls) {
+  return text ? `<span class="tag ${cls || 'neutral'}">${esc(text)}</span>` : '';
+}
+function card(title, icon, tagText, tagCls, body) {
+  return `<section class="card"><h2><span class="title">${ICONS[icon] || ''}${esc(title)}</span>${tag(tagText, tagCls)}</h2>${body}</section>`;
+}
+function acc(label, inner) {
+  return `<div class="acc"><button class="acc-hd" type="button" onclick="this.parentElement.classList.toggle('open')"><span class="acc-caret">▸</span>${esc(label)}</button><div class="acc-bd">${inner}</div></div>`;
 }
 
 function render(d) {
   const g = document.getElementById('grid');
   const panels = [];
-  document.getElementById('ver').textContent = 'v' + d.app.version + ' · up ' + d.app.uptime;
+  document.getElementById('ver').textContent = 'v' + d.app.version;
   const rt = document.getElementById('runtime');
-  rt.innerHTML = '';
-  const rtClass = d.runtime_environment.includes('Kubernetes') ? 'k8s' : d.runtime_environment.includes('Cloud') ? 'cf' : 'other';
-  rt.className = 'badge ' + rtClass;
-  if (rtClass === 'k8s') rt.appendChild(Object.assign(document.createElement('span'), {innerHTML: ICONS.k8s}).firstElementChild);
-  if (rtClass === 'cf') rt.appendChild(Object.assign(document.createElement('span'), {innerHTML: ICONS.cf}).firstElementChild);
-  rt.appendChild(document.createTextNode(d.runtime_environment));
+  rt.className = 'tag ' + (d.runtime_environment.includes('Kubernetes') ? 'k8s' : 'info');
+  rt.innerHTML = (d.runtime_environment.includes('Kubernetes') ? ICONS.k8s : ICONS.cf) + esc(d.runtime_environment);
+  document.getElementById('brandicon').innerHTML = d.runtime_environment.includes('Kubernetes') ? ICONS.k8s : ICONS.cf;
 
   const sec = d.security;
   const inst = d.instance;
   const cf = sec.platform.cloud_foundry, k8s = sec.platform.kubernetes;
   const os = sec.os_stack, ct = sec.container;
 
-  // ---- 1. Container Instance (instance number is the hero) ----
+  // ---- 1. Container Instance (hero number) ----
   const idxLabel = inst.index !== null && inst.index !== undefined ? '#' + inst.index : '—';
   panels.push(card('Container Instance', 'box', d.runtime_environment,
-    `<div class="inst-hero">${ICONS.box}<div class="inst-hero-num">${esc(idxLabel)}</div>` +
-    `<div class="inst-hero-meta">instance ${inst.guid ? esc(inst.guid) : ''}</div></div>` +
-    `<table>${kv([
-      ['Instance GUID', inst.guid],
-      ['Hostname', inst.hostname],
-      ['Internal IP', inst.internal_ip],
-      ['External IP', inst.ip],
-      ['Started', d.app.started_at + ' (up ' + d.app.uptime + ')'],
-      ['PID 1', ct.pid1.comm + (ct.pid1.cmdline ? ' — ' + ct.pid1.cmdline : '')],
-      ['Cgroup', ct.cgroups && ct.cgroups.length ? ct.cgroups[0] : (ct.cgroup_unified || null)],
-    ])}</table>`));
+    d.runtime_environment.includes('Kubernetes') ? 'k8s' : 'info',
+    `<div class="hero"><div>
+        <div class="hero-label">instance number</div>
+        <div class="hero-num">${esc(idxLabel)}</div>
+        <div class="hero-sub">${inst.guid ? 'instance ' + esc(inst.guid) : ''}</div>
+      </div>
+      <table class="kv">${kv([
+        ['Started', d.app.started_at],
+        ['Uptime', d.app.uptime],
+        ['Hostname', inst.hostname],
+        ['Internal IP', inst.internal_ip],
+        ['External IP', inst.ip],
+        ['PID 1', ct.pid1.comm + (ct.pid1.cmdline ? ' — ' + ct.pid1.cmdline : '')],
+        ['Cgroup', ct.cgroups && ct.cgroups.length ? ct.cgroups[0] : (ct.cgroup_unified || null)],
+      ])}</table></div>`));
 
-  // ---- 2. Security (group of sub-panels) ----
+  // ---- 2. Security (group) ----
   const secPanels = [];
 
-  // 2.1 Application Layer (env vars folded in as a pull-down)
+  // 2.1 Application Layer (env vars as accordion)
   const app = sec.application_layer, rep = app.repository;
   const envRows = d.environment_variables.map(e => [e.name, e.value]);
-  const envDetails = `<details><summary class="hint">environment variables — ${d.environment_variables.length} vars · secrets masked</summary><table>${kv(envRows)}</table></details>`;
-  secPanels.push(card('Application Layer', 'layer', null, `<table>${kv([
-    ['Application', app.application.name + ' — v' + app.application.app_version],
-    ['App ID', app.application.id],
-    ['Routes', (app.application.uris || []).join(', ') || null],
-    ['Org / Space', app.application.organization ? app.application.organization + ' / ' + app.application.space : null],
-    ['CF API', app.application.cf_api],
-    ['Process type', app.application.process_type],
-    ['Build ID', app.application.build_id],
-    ['Git repository', rep.origin || null],
-    ['Git commit', rep.commit || null],
-    ['Working directory', app.working_directory],
-  ])}</table>` + envDetails));
+  const envAcc = acc('environment variables — ' + d.environment_variables.length + ' vars · secrets masked',
+    `<table class="kv">${kv(envRows)}</table>`);
+  secPanels.push(card('Application Layer', 'layer', 'v' + app.application.app_version, 'neutral',
+    `<table class="kv">${kv([
+      ['Application', app.application.name + ' — v' + app.application.app_version],
+      ['App ID', app.application.id],
+      ['Routes', (app.application.uris || []).join(', ') || null],
+      ['Org / Space', app.application.organization ? app.application.organization + ' / ' + app.application.space : null],
+      ['CF API', app.application.cf_api],
+      ['Process type', app.application.process_type],
+      ['Build ID', app.application.build_id],
+      ['Git repository', rep.origin || null],
+      ['Git commit', rep.commit || null],
+      ['Working directory', app.working_directory],
+    ])}</table>` + envAcc));
 
   // 2.2 Application Dependencies
   const dep = sec.dependencies;
   const depBody = dep.total
     ? dep.packages.map(p =>
         `<div class="pkg"><span class="pname">${esc(p.name)}</span><span class="pver">${esc(p.version)}</span>` +
-        `<span class="tag${p.direct ? ' direct' : ''}">${p.direct ? 'DIRECT' : 'TRANSITIVE'}</span>` +
-        (p.requires.length ? `<span class="muted" style="font-size:11px">← ${esc(p.requires.join(', '))}</span>` : '') +
+        `<span class="tag ${p.direct ? 'success' : 'neutral'}">${p.direct ? 'DIRECT' : 'TRANSITIVE'}</span>` +
+        (p.requires.length ? `<span class="reqs">requires ${esc(p.requires.join(', '))}</span>` : '') +
         `</div>`).join('')
-    : '<div class="hint">No third-party packages detected — stdlib-only app.</div>' +
+    : '<div class="muted" style="padding:12px 18px">No third-party packages detected — stdlib-only app.</div>' +
       (dep.direct.length ? `<pre>${esc(dep.direct.join('\\n'))}</pre>` : '');
   secPanels.push(card('Application Dependencies', 'layer',
-    dep.total ? dep.direct_count + ' direct · ' + dep.transitive_count + ' transitive' : 'stdlib only',
+    dep.total ? dep.direct_count + ' direct · ' + dep.transitive_count + ' transitive' : 'stdlib only', 'neutral',
     depBody));
 
   // 2.3 Buildpack (runtime)
   const br = sec.buildpack_runtime;
-  const bpRows = [
+  let bpBody = `<table class="kv">${kv([
     ['Python runtime', br.python.version + ' (' + br.python.implementation + ')'],
     ['Python build', br.python.full],
     ['Python executable', br.python.executable],
     ['pip', br.packages.pip],
     ['setuptools', br.packages.setuptools],
-  ];
-  let bpBody = `<table>${kv(bpRows)}</table>`;
+  ])}</table>`;
   if (br.buildpack_dep_layers.length) {
     bpBody += br.buildpack_dep_layers.map(l =>
-      `<details><summary class="hint">buildpack layer ${esc(l.layer)} — ${l.tools.length} tools</summary><pre>${esc(l.tools.join('\\n') || 'no bin/ tools')}</pre></details>`).join('');
+      acc('buildpack layer ' + l.layer + ' — ' + l.tools.length + ' tools',
+        `<pre>${esc(l.tools.join('\\n') || 'no bin/ tools')}</pre>`)).join('');
   }
-  secPanels.push(card('Buildpack (runtime)', 'python', 'python_buildpack', bpBody));
+  secPanels.push(card('Buildpack (runtime)', 'python', 'python_buildpack', 'neutral', bpBody));
 
   // 2.4 Stack (root filesystem)
   const h = os.hardening;
-  const stackRows = [
+  let stackBody = `<table class="kv">${kv([
     ['Distribution', os.distribution],
     ['OS release', os.os_release ? (os.os_release.VERSION + ' (' + (os.os_release.ID || '') + ' ' + (os.os_release.ID_LIKE || '') + ')') : null],
     ['CF stack', os.cf_stack_file],
@@ -853,10 +937,11 @@ function render(d) {
     ['glibc', os.glibc],
     ['Hardening', h ? h.summary.join(' · ') : null],
     ['Stemcell', 'node-level fact — not visible from inside the container'],
-  ];
-  secPanels.push(card('Stack (root filesystem)', 'ubuntu', os.distribution,
-    `<table>${kv(stackRows)}</table>` +
-    (ct.cgroups && ct.cgroups.length > 1 ? `<details><summary class="hint">all cgroups</summary><pre>${esc(ct.cgroups.join('\\n'))}</pre></details>` : '')));
+  ])}</table>`;
+  if (ct.cgroups && ct.cgroups.length > 1) {
+    stackBody += acc('all cgroups', `<pre>${esc(ct.cgroups.join('\\n'))}</pre>`);
+  }
+  secPanels.push(card('Stack (root filesystem)', 'ubuntu', os.distribution, 'neutral', stackBody));
 
   // 2.5 Container platform
   const k8sRows = [
@@ -869,48 +954,53 @@ function render(d) {
     ['K8s env vars', Object.keys(k8s.env).length ? Object.entries(k8s.env).map(([k, v]) => k + '=' + v).join('; ') : null],
     ['k8s-app-entrypoint', ct.k8s_entrypoint_config ? 'present' : null],
   ];
-  let platBody, platPill;
+  let platBody, platTag, platCls;
   if (k8s.detected) {
-    platBody = `<table>${kv(k8sRows)}</table>`;
+    platBody = `<table class="kv">${kv(k8sRows)}</table>`;
     if (ct.k8s_entrypoint_config) {
-      platBody += `<details><summary class="hint">k8s-app-entrypoint-config.json</summary><pre>${esc(JSON.stringify(ct.k8s_entrypoint_config, null, 2))}</pre></details>`;
+      platBody += acc('k8s-app-entrypoint-config.json', `<pre>${esc(JSON.stringify(ct.k8s_entrypoint_config, null, 2))}</pre>`);
     }
     if (cf.detected) {
-      platBody += `<details><summary class="hint">CF overlay on this Kubernetes cluster (VKS)</summary><pre>${esc(JSON.stringify(cf.application, null, 2))}</pre></details>`;
+      platBody += acc('CF overlay on this Kubernetes cluster (VKS)', `<pre>${esc(JSON.stringify(cf.application, null, 2))}</pre>`);
     }
-    platPill = k8s.api_server.host ? k8s.api_server.host : 'detected';
+    platTag = k8s.api_server.host ? k8s.api_server.host : 'detected';
+    platCls = 'k8s';
   } else {
-    const cfRows = [
+    platBody = `<table class="kv">${kv([
       ['App ID', cf.application && cf.application.application_id],
       ['Uris', cf.application && (cf.application.application_uris || []).join(', ')],
       ['Build', cf.application && cf.application.build],
       ['Services', cf.services.map(s => s.name + ' [' + s.label + ':' + s.plan + ']').join(', ') || null],
       ['Buildpack dep layers', cf.buildpack_dep_layers.map(l => l.layer + ' (' + l.tools.length + ' tools)').join('  ') || null],
-    ];
-    platBody = `<table>${kv(cfRows)}</table>`;
+    ])}</table>`;
     if (cf.application) {
-      platBody += `<details><summary class="hint">VCAP_APPLICATION raw</summary><pre>${esc(JSON.stringify(cf.application, null, 2))}</pre></details>`;
+      platBody += acc('VCAP_APPLICATION raw', `<pre>${esc(JSON.stringify(cf.application, null, 2))}</pre>`);
     }
-    platPill = 'detected';
+    platTag = 'detected';
+    platCls = 'info';
   }
-  secPanels.push(card('Container platform', k8s.detected ? 'k8s' : 'cf', platPill, platBody));
+  secPanels.push(card('Container platform', k8s.detected ? 'k8s' : 'cf', platTag, platCls, platBody));
 
-  panels.push(`<div class="group"><h2>${ICONS.shield}Security</h2><div class="stack">${secPanels.join('')}</div></div>`);
+  panels.push(`<div class="sec-group"><h2>${ICONS.shield}Security</h2><div class="stack">${secPanels.join('')}</div></div>`);
 
   // ---- 3. Networking ----
   const n = d.network;
-  panels.push(card('Networking', 'net', null, `<table>${kv([
+  let netBody = `<table class="kv">${kv([
     ['Hostname', n.hostname + (n.hostname_resolves_to.length ? ' → ' + n.hostname_resolves_to.join(', ') : '')],
     ['Default route', n.default_route ? 'via ' + n.default_route.gateway + ' on ' + n.default_route.interface : null],
     ['DNS servers', n.dns.nameservers.join(', ') || null],
     ['DNS search', (n.dns.search_domains[0] || []).join(' ') || null],
     ['Listening', n.listening_sockets.map(s => s.address + ':' + s.port).join(', ') || 'none'],
   ])}</table>` + n.interfaces.map(i =>
-    `<details><summary class="hint">iface ${esc(i.name)} — ${esc(i.state || '?')}, mtu ${esc(i.mtu)}, ${esc(i.mac)}</summary><pre>${esc((i.ipv4 || []).join('\\n') || 'no addresses')}</pre></details>`).join('') +
-    (n.routes && n.routes.length ? `<details><summary class="hint">routes</summary><pre>${esc(n.routes.map(r => r.dest + ' via ' + r.gateway + ' dev ' + r.interface).join('\\n'))}</pre></details>` : '')));
+    acc('iface ' + i.name + ' — ' + (i.state || '?') + ', mtu ' + i.mtu + ', ' + i.mac,
+      `<pre>${esc((i.ipv4 || []).join('\\n') || 'no addresses')}</pre>`)).join('');
+  if (n.routes && n.routes.length) {
+    netBody += acc('routes', `<pre>${esc(n.routes.map(r => r.dest + ' via ' + r.gateway + ' dev ' + r.interface).join('\\n'))}</pre>`);
+  }
+  panels.push(card('Networking', 'net', null, null, netBody));
 
-  // ---- 4. Infrastructure (node-level resources) ----
-  panels.push(card('Infrastructure', 'net', null, `<table>${kv([
+  // ---- 4. Infrastructure ----
+  panels.push(card('Infrastructure', 'net', null, null, `<table class="kv">${kv([
     ['CPU', os.cpu_count + ' × ' + os.cpu_model],
     ['Memory', os.memory_total_mb ? os.memory_total_mb + ' MB total / ' + os.memory_available_mb + ' MB available' : null],
     ['Disk', os.disk ? Object.entries(os.disk).map(([m, x]) => m + ': ' + x.used_gb + '/' + x.total_gb + ' GB').join('  ') : null],
@@ -933,6 +1023,7 @@ load();
 </body>
 </html>
 """
+
 
 
 class Handler(BaseHTTPRequestHandler):

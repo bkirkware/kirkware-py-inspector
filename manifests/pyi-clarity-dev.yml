@@ -1,0 +1,21 @@
+---
+# pyi-clarity-dev — DEVELOPMENT deployment for the ui-clarity-dev branch.
+# UI restyle toward VMware Clarity (vmware-clarity/core as north star).
+# Space: cody (VM-based Diego). Review URL: pyi-clarity.apps.tanzu.kirkware.net
+# Production matrix: see pyi-fs4 / pyi-fs1 / pyi-fs4-old (+ -k8s variants).
+applications:
+- name: pyi-clarity-dev
+  memory: 128M
+  disk_quota: 1G
+  instances: 1
+  stack: cflinuxfs4
+  buildpacks:
+    - python_buildpack
+  command: python3 main.py
+  routes:
+    - route: pyi-clarity.apps.tanzu.kirkware.net
+  # Where this app is stored. CF droplets drop .git, so the app reads these
+  # from the environment; deploy.sh stamps the live values at push time.
+  env:
+    GIT_REPO_URL: "https://github.com/bkirkware/kirkware-py-inspector.git"
+    GIT_COMMIT: "unknown"
