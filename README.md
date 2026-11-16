@@ -58,6 +58,11 @@ Test matrix used for this app:
 - VM-based Diego cells → org `kirkware-devs`, space `cody`
 - Kubernetes (VKS) → org `kirkware-devs`, space `cody-k8s`
 - cf CLI against the Hub endpoint (`https://hub.tanzu.kirkware.net`)
+- `./deploy.sh [space]` targets the space and pushes, stamping the live
+  `remote.origin.url` + `HEAD` into the generated manifest so the running
+  app can report its repository and commit.
+- Pushing to GitHub: `git push https://bkirkware:$BKIRKWARE_GIT_TOKEN@github.com/bkirkware/kirkware-py-inspector.git main`
+  (the `KIRKWARE_GIT_TOKEN`/`kirkware` pair gets 403 on this repo).
 
 ## Deploy to Kubernetes
 
