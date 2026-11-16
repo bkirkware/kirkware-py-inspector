@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_NAME = "kirkware-py-inspector"
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 START_TIME = time.time()
 HOST = os.environ.get("BIND", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -892,7 +892,7 @@ function render(d) {
       ['Buildpack', (br.buildpack.name || 'unknown') + ' — v' + (br.buildpack.version || 'unknown')],
       ['Stack', os.stack || 'unknown'],
       ['OS release', osRelease],
-      ['Stemcell Kernel', os.kernel + ' (' + os.arch + ')'],
+      ['OS Kernel', os.kernel + ' (' + os.arch + ')'],
     ])}</table>`);
   panels.push(`<div class="sec-group"><h2>${ICONS.layer}Summary</h2><div class="stack">${instCard + layerCard}</div></div>`);
 
