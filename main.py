@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_NAME = "kirkware-py-inspector"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 START_TIME = time.time()
 HOST = os.environ.get("BIND", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -710,6 +710,14 @@ PAGE = """<!doctype html>
   .pkg:last-child { border-bottom: none; }
   .pkg .pname { font-weight: 600; font-family: var(--mono); font-size: 12.5px; }
   .pkg .pver { font-family: var(--mono); font-size: 12px; color: var(--dim); }
+  .inst-hero { display: flex; align-items: center; gap: 18px; padding: 20px 22px 16px;
+               background: linear-gradient(135deg, rgba(88,166,255,.10), rgba(88,166,255,.02));
+               border-bottom: 1px solid var(--border); }
+  .inst-hero .icon { width: 46px; height: 46px; }
+  .inst-hero-num { font: 800 56px/.9 var(--mono); color: var(--accent); letter-spacing: -1px;
+                  text-shadow: 0 0 24px rgba(88,166,255,.45); }
+  .inst-hero-meta { color: var(--dim); font-size: 12px; font-family: var(--mono);
+                    margin-top: 4px; word-break: break-all; }
   .tag { font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 999px;
          border: 1px solid var(--border); color: var(--dim); letter-spacing: .5px; }
   .tag.direct { color: var(--ok); border-color: var(--ok); }
@@ -733,16 +741,19 @@ const esc = s => String(s ?? "—").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&
 const kv = (rows) => rows.map(([k, v]) =>
   `<tr><td class="k">${esc(k)}</td><td class="v">${v === null || v === undefined || v === '' ? '<span class="muted">not detected</span>' : esc(v)}</td></tr>`).join('');
 
-// ---- text-based SVG icons -------------------------------------------------
+// ---- SVG icons -------------------------------------------------------------
+// Kubernetes + Cloud Foundry: official brand marks from Simple Icons (CC0),
+// 24×24 filled paths, official brand colors. Others: simple strokes.
 const ICONS = {
-  k8s: '<svg class="icon" viewBox="0 0 20 20"><polygon points="10,1 17.2,4.7 17.2,13.4 10,17 2.8,13.4 2.8,4.7" fill="none" stroke="#64b5f6" stroke-width="1.4"/><text x="10" y="13" font-size="6" fill="#64b5f6" text-anchor="middle">k8s</text></svg>',
-  cf: '<svg class="icon" viewBox="0 0 20 20"><rect x="1.5" y="1.5" width="17" height="17" rx="4" fill="none" stroke="#ffd358" stroke-width="1.4"/><text x="10" y="13.5" font-size="7" fill="#ffd358" text-anchor="middle">CF</text></svg>',
+  // Official Kubernetes mark (Simple Icons, CC0) — helmsman wheel in heptagon.
+  k8s: '<svg class="icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="#326CE5"><path d="M10.204 14.35l.007.01-.999 2.413a5.171 5.171 0 0 1-2.075-2.597l2.578-.437.004.005a.44.44 0 0 1 .484.606zm-.833-2.129a.44.44 0 0 0 .173-.756l.002-.011L7.585 9.7a5.143 5.143 0 0 0-.73 3.255l2.514-.725.002-.009zm1.145-1.98a.44.44 0 0 0 .699-.337l.01-.005.15-2.62a5.144 5.144 0 0 0-3.01 1.442l2.147 1.523.004-.002zm.76 2.75l.723.349.722-.347.18-.78-.5-.623h-.804l-.5.623.179.779zm1.5-3.095a.44.44 0 0 0 .7.336l.008.003 2.134-1.513a5.188 5.188 0 0 0-2.992-1.442l.148 2.615.002.001zm10.876 5.97l-5.773 7.181a1.6 1.6 0 0 1-1.248.594l-9.261.003a1.6 1.6 0 0 1-1.247-.596l-5.776-7.18a1.583 1.583 0 0 1-.307-1.34L2.1 5.573c.108-.47.425-.864.863-1.073L11.305.513a1.606 1.606 0 0 1 1.385 0l8.345 3.985c.438.209.755.604.863 1.073l2.062 8.955c.108.47-.005.963-.308 1.34zm-3.289-2.057c-.042-.01-.103-.026-.145-.034-.174-.033-.315-.025-.479-.038-.35-.037-.638-.067-.895-.148-.105-.04-.18-.165-.216-.216l-.201-.059a6.45 6.45 0 0 0-.105-2.332 6.465 6.465 0 0 0-.936-2.163c.052-.047.15-.133.177-.159.008-.09.001-.183.094-.282.197-.185.444-.338.743-.522.142-.084.273-.137.415-.242.032-.024.076-.062.11-.089.24-.191.295-.52.123-.736-.172-.216-.506-.236-.745-.045-.034.027-.08.062-.111.088-.134.116-.217.23-.33.35-.246.25-.45.458-.673.609-.097.056-.239.037-.303.033l-.19.135a6.545 6.545 0 0 0-4.146-2.003l-.012-.223c-.065-.062-.143-.115-.163-.25-.022-.268.015-.557.057-.905.023-.163.061-.298.068-.475.001-.04-.001-.099-.001-.142 0-.306-.224-.555-.5-.555-.275 0-.499.249-.499.555l.001.014c0 .041-.002.092 0 .128.006.177.044.312.067.475.042.348.078.637.056.906a.545.545 0 0 1-.162.258l-.012.211a6.424 6.424 0 0 0-4.166 2.003 8.373 8.373 0 0 1-.18-.128c-.09.012-.18.04-.297-.029-.223-.15-.427-.358-.673-.608-.113-.12-.195-.234-.329-.349-.03-.026-.077-.062-.111-.088a.594.594 0 0 0-.348-.132.481.481 0 0 0-.398.176c-.172.216-.117.546.123.737l.007.005.104.083c.142.105.272.159.414.242.299.185.546.338.743.522.076.082.09.226.1.288l.16.143a6.462 6.462 0 0 0-1.02 4.506l-.208.06c-.055.072-.133.184-.215.217-.257.081-.546.11-.895.147-.164.014-.305.006-.48.039-.037.007-.09.02-.133.03l-.004.002-.007.002c-.295.071-.484.342-.423.608.061.267.349.429.645.365l.007-.001.01-.003.129-.029c.17-.046.294-.113.448-.172.33-.118.604-.217.87-.256.112-.009.23.069.288.101l.217-.037a6.5 6.5 0 0 0 2.88 3.596l-.09.218c.033.084.069.199.044.282-.097.252-.263.517-.452.813-.091.136-.185.242-.268.399-.02.037-.045.095-.064.134-.128.275-.034.591.213.71.248.12.556-.007.69-.282v-.002c.02-.039.046-.09.062-.127.07-.162.094-.301.144-.458.132-.332.205-.68.387-.897.05-.06.13-.082.215-.105l.113-.205a6.453 6.453 0 0 0 4.609.012l.106.192c.086.028.18.042.256.155.136.232.229.507.342.84.05.156.074.295.145.457.016.037.043.09.062.129.133.276.442.402.69.282.247-.118.341-.435.213-.71-.02-.039-.045-.096-.065-.134-.083-.156-.177-.261-.268-.398-.19-.296-.346-.541-.443-.793-.04-.13.007-.21.038-.294-.018-.022-.059-.144-.083-.202a6.499 6.499 0 0 0 2.88-3.622c.064.01.176.03.213.038.075-.05.144-.114.28-.104.266.039.54.138.87.256.154.06.277.128.448.173.036.01.088.019.13.028l.009.003.007.001c.297.064.584-.098.645-.365.06-.266-.128-.537-.423-.608zM16.4 9.701l-1.95 1.746v.005a.44.44 0 0 0 .173.757l.003.01 2.526.728a5.199 5.199 0 0 0-.108-1.674A5.208 5.208 0 0 0 16.4 9.7zm-4.013 5.325a.437.437 0 0 0-.404-.232.44.44 0 0 0-.372.233h-.002l-1.268 2.292a5.164 5.164 0 0 0 3.326.003l-1.27-2.296h-.01zm1.888-1.293a.44.44 0 0 0-.27.036.44.44 0 0 0-.214.572l-.003.004 1.01 2.438a5.15 5.15 0 0 0 2.081-2.615l-2.6-.44-.004.005z"/></svg>',
+  // Official Cloud Foundry mark (Simple Icons, CC0) — the "C" in a ring.
+  cf: '<svg class="icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="#0C9ED5"><path d="M12.854 13.537c-.048 1.79.074 3.862.149 4.917.96.136 1.633.456 1.633.83 0 .497-1.193 1.07-2.665 1.07s-2.665-.573-2.665-1.07c0-.374.673-.694 1.633-.83.075-1.055.197-3.127.15-4.917-.044-1.613-.779-3.091-1.676-3.821-.725-.59-1.174-1.427-1.166-2.354.016-1.765 1.683-3.186 3.724-3.186s3.708 1.42 3.723 3.186c.008.927-.44 1.763-1.165 2.354-.897.73-1.632 2.208-1.675 3.821zm6.214 6.596c.287-.115.612-.177.951-.19-.007-.24-.166-.672-.303-.877-.56-.1-1.276-.313-1.658-.682a.48.48 0 0 1-.186-.41c.026-.146.133-.253.278-.329a8.115 8.115 0 0 0-1.08-.515 4.6 4.6 0 0 1-1.697-.124c-.303-.09-.764-.24-.82-.549-.16-.03-.54-.083-.766-.112a4.048 4.048 0 0 0-.07.31.815.815 0 0 0 .56.956c1 .291 1.756.77 1.974 1.359.44 1.19-1.413 2.353-4.231 2.353-2.82 0-4.673-1.163-4.233-2.353.213-.574.94-1.044 1.903-1.337a.863.863 0 0 0 .589-1.005l-.06-.283c-.291.03-.779.101-1.031.148-.019.313-.476.466-.76.564a4.65 4.65 0 0 1-1.708.147 7.82 7.82 0 0 0-1.052.535c.544.23.316.736-.09.97-.407.253-.842.409-1.38.51-.051.088-.111.298-.163.438-.016.136-.063.367-.053.459.645.02 1.268.152 1.62.605.281.508-.024.976-.51 1.364.392.316.986.673 1.45.868a4.82 4.82 0 0 1 2.715-.269c.718.16 1.506.581 1.742 1.289.635.042 1.895.04 2.528-.041.182-.731.907-1.147 1.606-1.326a4.803 4.803 0 0 1 2.712.193c.356-.18 1.03-.602 1.306-.9-.474-.358-.873-.794-.63-1.325.085-.19.301-.33.547-.44zm-9.54-5.848s.418-1.586-1.4-3.632A4.99 4.99 0 0 1 6.88 7.346a5.05 5.05 0 0 1 5.047-5.04c2.822-.065 5.168 2.218 5.164 5.04a4.984 4.984 0 0 1-1.248 3.306c-1.614 1.616-1.4 3.633-1.4 3.633a7.352 7.352 0 0 0 4.956-6.898c.035-4.021-3.39-7.47-7.414-7.385-4.027-.083-7.447 3.364-7.413 7.385a7.352 7.352 0 0 0 4.956 6.898z"/></svg>',
   python: '<svg class="icon" viewBox="0 0 20 20"><ellipse cx="10" cy="10" rx="8.4" ry="5.6" fill="none" stroke="#6fa8dc" stroke-width="1.3" transform="rotate(-24 10 10)"/><ellipse cx="10" cy="10" rx="8.4" ry="5.6" fill="none" stroke="#6fa8dc" stroke-width="1.3" transform="rotate(24 10 10)"/></svg>',
   ubuntu: '<svg class="icon" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8" fill="none" stroke="#e95420" stroke-width="1.4"/><circle cx="10" cy="4.6" r="1.7" fill="#e95420"/><circle cx="5.3" cy="13" r="1.7" fill="#e95420"/><circle cx="14.7" cy="13" r="1.7" fill="#e95420"/></svg>',
   shield: '<svg class="icon" viewBox="0 0 20 20"><path d="M10 1.5 L16.5 4 V9.5 C16.5 13.8 13.7 16.9 10 18.5 C6.3 16.9 3.5 13.8 3.5 9.5 V4 Z" fill="none" stroke="#8b949e" stroke-width="1.4"/><text x="10" y="13" font-size="7" fill="#8b949e" text-anchor="middle">S</text></svg>',
-  box: '<svg class="icon" viewBox="0 0 20 20"><rect x="2.5" y="2.5" width="15" height="15" rx="2.5" fill="none" stroke="#8b949e" stroke-width="1.4"/><text x="10" y="13" font-size="6.5" fill="#8b949e" text-anchor="middle">#0</text></svg>',
+  box: '<svg class="icon" viewBox="0 0 20 20"><rect x="2.5" y="2.5" width="15" height="15" rx="2.5" fill="none" stroke="#58a6ff" stroke-width="1.4"/><path d="M2.5 8 H17.5" stroke="#58a6ff" stroke-width="1.1"/><circle cx="5.2" cy="5.2" r=".9" fill="#58a6ff"/><circle cx="7.6" cy="5.2" r=".9" fill="#58a6ff"/></svg>',
   net: '<svg class="icon" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8" fill="none" stroke="#58a6ff" stroke-width="1.3"/><ellipse cx="10" cy="10" rx="3.6" ry="8" fill="none" stroke="#58a6ff" stroke-width="1.1"/><line x1="2" y1="10" x2="18" y2="10" stroke="#58a6ff" stroke-width="1.1"/><line x1="3.4" y1="6" x2="16.6" y2="6" stroke="#58a6ff" stroke-width="1.1"/><line x1="3.4" y1="14" x2="16.6" y2="14" stroke="#58a6ff" stroke-width="1.1"/></svg>',
-  env: '<svg class="icon" viewBox="0 0 20 20"><circle cx="10" cy="10" r="7.5" fill="none" stroke="#8b949e" stroke-width="1.3"/><path d="M10 5.5 V10 L13 12" stroke="#8b949e" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg>',
   layer: '<svg class="icon" viewBox="0 0 20 20"><path d="M10 2.5 L17.5 6.5 L10 10.5 L2.5 6.5 Z" fill="none" stroke="#8b949e" stroke-width="1.3"/><path d="M2.5 10 L10 14 L17.5 10" fill="none" stroke="#8b949e" stroke-width="1.3"/><path d="M2.5 13.5 L10 17.5 L17.5 13.5" fill="none" stroke="#8b949e" stroke-width="1.3"/></svg>',
 };
 
@@ -767,23 +778,28 @@ function render(d) {
   const cf = sec.platform.cloud_foundry, k8s = sec.platform.kubernetes;
   const os = sec.os_stack, ct = sec.container;
 
-  // ---- 1. Container Instance ----
-  panels.push(card('Container Instance', 'box', d.runtime_environment, `<table>${kv([
-    ['Instance number', inst.index !== null && inst.index !== undefined ? '#' + inst.index : null],
-    ['Instance GUID', inst.guid],
-    ['Hostname', inst.hostname],
-    ['Internal IP', inst.internal_ip],
-    ['External IP', inst.ip],
-    ['Started', d.app.started_at + ' (up ' + d.app.uptime + ')'],
-    ['PID 1', ct.pid1.comm + (ct.pid1.cmdline ? ' — ' + ct.pid1.cmdline : '')],
-    ['Cgroup', ct.cgroups && ct.cgroups.length ? ct.cgroups[0] : (ct.cgroup_unified || null)],
-  ])}</table>`));
+  // ---- 1. Container Instance (instance number is the hero) ----
+  const idxLabel = inst.index !== null && inst.index !== undefined ? '#' + inst.index : '—';
+  panels.push(card('Container Instance', 'box', d.runtime_environment,
+    `<div class="inst-hero">${ICONS.box}<div class="inst-hero-num">${esc(idxLabel)}</div>` +
+    `<div class="inst-hero-meta">instance ${inst.guid ? esc(inst.guid) : ''}</div></div>` +
+    `<table>${kv([
+      ['Instance GUID', inst.guid],
+      ['Hostname', inst.hostname],
+      ['Internal IP', inst.internal_ip],
+      ['External IP', inst.ip],
+      ['Started', d.app.started_at + ' (up ' + d.app.uptime + ')'],
+      ['PID 1', ct.pid1.comm + (ct.pid1.cmdline ? ' — ' + ct.pid1.cmdline : '')],
+      ['Cgroup', ct.cgroups && ct.cgroups.length ? ct.cgroups[0] : (ct.cgroup_unified || null)],
+    ])}</table>`));
 
   // ---- 2. Security (group of sub-panels) ----
   const secPanels = [];
 
-  // 2.1 Application Layer
+  // 2.1 Application Layer (env vars folded in as a pull-down)
   const app = sec.application_layer, rep = app.repository;
+  const envRows = d.environment_variables.map(e => [e.name, e.value]);
+  const envDetails = `<details><summary class="hint">environment variables — ${d.environment_variables.length} vars · secrets masked</summary><table>${kv(envRows)}</table></details>`;
   secPanels.push(card('Application Layer', 'layer', null, `<table>${kv([
     ['Application', app.application.name + ' — v' + app.application.app_version],
     ['App ID', app.application.id],
@@ -795,7 +811,7 @@ function render(d) {
     ['Git repository', rep.origin || null],
     ['Git commit', rep.commit || null],
     ['Working directory', app.working_directory],
-  ])}</table>`));
+  ])}</table>` + envDetails));
 
   // 2.2 Application Dependencies
   const dep = sec.dependencies;
@@ -835,9 +851,6 @@ function render(d) {
     ['CF stack', os.cf_stack_file],
     ['Kernel', os.kernel + ' (' + os.arch + ')'],
     ['glibc', os.glibc],
-    ['CPU', os.cpu_count + ' × ' + os.cpu_model],
-    ['Memory', os.memory_total_mb ? os.memory_total_mb + ' MB total / ' + os.memory_available_mb + ' MB available' : null],
-    ['Disk', os.disk ? Object.entries(os.disk).map(([m, x]) => m + ': ' + x.used_gb + '/' + x.total_gb + ' GB').join('  ') : null],
     ['Hardening', h ? h.summary.join(' · ') : null],
     ['Stemcell', 'node-level fact — not visible from inside the container'],
   ];
@@ -896,10 +909,12 @@ function render(d) {
     `<details><summary class="hint">iface ${esc(i.name)} — ${esc(i.state || '?')}, mtu ${esc(i.mtu)}, ${esc(i.mac)}</summary><pre>${esc((i.ipv4 || []).join('\\n') || 'no addresses')}</pre></details>`).join('') +
     (n.routes && n.routes.length ? `<details><summary class="hint">routes</summary><pre>${esc(n.routes.map(r => r.dest + ' via ' + r.gateway + ' dev ' + r.interface).join('\\n'))}</pre></details>` : '')));
 
-  // ---- 4. Environment Variables ----
-  const envRows = d.environment_variables.map(e => [e.name, e.value]);
-  panels.push(card('Environment Variables', 'env', d.environment_variables.length + ' vars · secrets masked',
-    `<table>${kv(envRows)}</table>`));
+  // ---- 4. Infrastructure (node-level resources) ----
+  panels.push(card('Infrastructure', 'net', null, `<table>${kv([
+    ['CPU', os.cpu_count + ' × ' + os.cpu_model],
+    ['Memory', os.memory_total_mb ? os.memory_total_mb + ' MB total / ' + os.memory_available_mb + ' MB available' : null],
+    ['Disk', os.disk ? Object.entries(os.disk).map(([m, x]) => m + ': ' + x.used_gb + '/' + x.total_gb + ' GB').join('  ') : null],
+  ])}</table>`));
 
   g.innerHTML = panels.join('');
 }

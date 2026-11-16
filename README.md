@@ -9,31 +9,36 @@ CF-on-K8s / VKS, where both are detected and Kubernetes is labeled first).
 
 UI sections, one panel per row:
 
-1. **Container Instance** — instance number, instance GUID, hostname,
-   internal/external IP, started-at + human-friendly uptime, PID 1, cgroup.
+1. **Container Instance** — the instance number as a large hero display,
+   plus instance GUID, hostname, internal/external IP, started-at +
+   human-friendly uptime, PID 1, cgroup.
 2. **Security** — a group of five sub-panels:
    - *Application Layer* — app name/version, app ID, routes, org/space,
-     CF API, process type, build ID, git repository origin + commit.
+     CF API, process type, build ID, git repository origin + commit;
+     **Environment Variables folded in as a collapsible pull-down**
+     (secrets masked).
    - *Application Dependencies* — every package in the app's environment
      (direct vs transitive, with the requirement edges that pulled each in).
    - *Buildpack (runtime)* — Python runtime (version, implementation,
      executable, build string), pip/setuptools, buildpack dependency layers
      and the tools each provides.
    - *Stack (root filesystem)* — distribution, OS release, CF stack, kernel,
-     glibc, CPU/memory/disk, container hardening posture (seccomp,
-     NoNewPrivs, capabilities, AppArmor visibility). Stemcell is a node-level
-     fact and is not observable from inside the container — the panel says so.
+     glibc, container hardening posture (seccomp, NoNewPrivs, capabilities,
+     AppArmor visibility). Stemcell is a node-level fact and is not
+     observable from inside the container — the panel says so.
    - *Container platform* — Cloud Foundry (app id, uris, build, services,
      buildpack layers) and/or Kubernetes (API server, service account,
      namespace, JWT claims, k8s-app-entrypoint config). On CF-on-K8s the
      Kubernetes facts lead and the CF overlay is shown in a collapsible.
 3. **Networking** — hostname + resolution, default route, DNS, listening
    sockets, per-interface detail (MAC/MTU/state/addresses), routes.
-4. **Environment Variables** — all env vars, secrets masked.
+4. **Infrastructure** — node-level resources: CPU (count × model), memory
+   (total/available), disk usage per mount.
 
 The header shows the detected container platform (Kubernetes wins over
-Cloud Foundry when both are present) with a matching badge, and app
-uptime in human form (e.g. `2d 3h 14m`).
+Cloud Foundry when both are present) with the official brand icon
+(Kubernetes and Cloud Foundry marks are the Simple Icons CC0 paths in their
+official colors), and app uptime in human form (e.g. `2d 3h 14m`).
 
 - **UI:** `GET /` — dark dashboard, "Runtime Inspector"
 - **API:** `GET /api/info` — full JSON
