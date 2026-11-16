@@ -1,0 +1,24 @@
+---
+# pyi-clarity-dev-k8s — DEVELOPMENT deployment (Kubernetes).
+# ui-clarity-dev branch. Companion to pyi-clarity-dev (space cody).
+# Space: cody-k8s (VKS). Review URL: pyi-clarity-k8s.apps.tanzu.kirkware.net
+# Production matrix: see pyi-fs4 / pyi-fs1 / pyi-fs4-old (+ -k8s variants).
+applications:
+- name: pyi-clarity-dev-k8s
+  memory: 128M
+  disk_quota: 1G
+  instances: 1
+  stack: cflinuxfs4
+  buildpacks:
+    - python_buildpack
+  command: python3 main.py
+  routes:
+    - route: pyi-clarity-k8s.apps.tanzu.kirkware.net
+  # Where this app is stored. CF droplets drop .git, so the app reads these
+  # from the environment; deploy.sh stamps the live values at push time.
+  env:
+    GIT_REPO_URL: "https://github.com/bkirkware/kirkware-py-inspector.git"
+    GIT_COMMIT: "unknown"
+    BUILDPACK_NAME: ""
+    BUILDPACK_VERSION: ""
+    APP_STACK: ""

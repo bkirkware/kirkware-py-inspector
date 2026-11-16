@@ -1,5 +1,5 @@
 ---
-# pyi-clarity-dev — DEVELOPMENT deployment for the ui-clarity-dev branch.
+# pyi-clarity-dev — DEVELOPMENT deployment (VM Diego).
 # UI restyle toward VMware Clarity (vmware-clarity/core as north star).
 # Space: cody (VM-based Diego). Review URL: pyi-clarity.apps.tanzu.kirkware.net
 # Production matrix: see pyi-fs4 / pyi-fs1 / pyi-fs4-old (+ -k8s variants).
