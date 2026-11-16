@@ -9,3 +9,8 @@ applications:
     - python_buildpack
   command: python3 main.py
   random-route: true
+  # Where this app is stored. CF droplets drop .git, so the app reads these
+  # from the environment; deploy.sh stamps the live values at push time.
+  env:
+    GIT_REPO_URL: "https://github.com/bkirkware/kirkware-py-inspector.git"
+    GIT_COMMIT: "unknown"

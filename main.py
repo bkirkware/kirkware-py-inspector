@@ -436,7 +436,14 @@ def app_layer_info():
             app = json.loads(raw)
         except Exception:
             app = None
+    app = app or {}
     git = parse_git_repo(os.getcwd())
+    # CF droplets drop .git, so probe local first then fall back to deploy-time
+    # env (set in manifest.yml). This is the honest "where the app is stored".
+    if not git["origin"]:
+        git["origin"] = os.environ.get("GIT_REPO_URL")
+    if not git["commit"]:
+        git["commit"] = os.environ.get("GIT_COMMIT")
     return {
         "application": {
             "name": (app or {}).get("application_name") or APP_NAME,
@@ -446,7 +453,8 @@ def app_layer_info():
             "space": (app or {}).get("space_name"),
             "cf_api": (app or {}).get("cf_api"),
             "process_type": (app or {}).get("process_type"),
-            "build_id": (app or {}).get("build"),
+            "build_id": (app or {}).get("application_version")
+            or (app or {}).get("build"),
             "app_version": APP_VERSION,
         },
         "repository": git,
