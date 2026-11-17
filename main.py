@@ -891,16 +891,36 @@ def _osv_kernel_query():
     """OSV kernel-query inputs, or (None, reason) when not applicable.
 
     Applicable only on Ubuntu-based stacks with a readable
-    /proc/version_signature (present on all modern Ubuntu/Debian kernels)."""
+    /proc/version_signature (present on all modern Ubuntu/Debian kernels).
+    The distro for the OSV ecosystem comes from the KERNEL's own revision
+    (e.g. `~24.04.1`), not the container image's VERSION_ID — a VKS pod can
+    run a 24.04 kernel inside a 22.04 image, and OSV keys kernel data by the
+    kernel's distro. OSV labels LTS releases `Ubuntu:<distro>:LTS` and
+    interim releases `Ubuntu:<distro>` (no suffix)."""
     rel = os_release()
     if rel.get("ID") != "ubuntu":
         return None, "not applicable (OSV kernel lookup covers Ubuntu stacks; this stack is %s)" % (rel.get("PRETTY_NAME") or "unknown")
     sig = _read("/proc/version_signature") or ""
-    m = re.match(r"Ubuntu\s+(\d+\.\d+\.\d+-\d+\.\d+)-generic", sig)
+    # Full Debian kernel version, optionally carrying a `~<year>.<minor>.<point>`
+    # distro revision (e.g. `6.17.0-29.29~24.04.1`). The `-generic` suffix is
+    # adjacent to the version (no space).
+    m = re.match(
+        r"Ubuntu\s+(\d+\.\d+\.\d+-\d+\.\d+(?:~[\d.]+)?)(?:-generic)?", sig)
     if not m:
         return None, "no /proc/version_signature on this kernel — full Debian kernel version unknown"
-    eco = "Ubuntu:%s:LTS" % rel["VERSION_ID"]
-    return {"ecosystem": eco, "name": "linux", "version": m.group(1)}, None
+    version = m.group(1)
+    dm = re.search(r"~(\d+\.\d+)\.\d+$", version)
+    if dm:
+        distro = dm.group(1)
+    else:
+        distro = rel.get("VERSION_ID") or ""
+    pm = re.match(r"(\d+)\.(\d+)", distro)
+    year, minor = (int(pm.group(1)), int(pm.group(2))) if pm else (0, 0)
+    if not distro:
+        return None, "could not determine the kernel distro revision"
+    lts = (year % 2 == 0 and minor == 4)
+    eco = "Ubuntu:%s%s" % (distro, ":LTS" if lts else "")
+    return {"ecosystem": eco, "name": "linux", "version": version}, None
 
 
 def _osv_max_severity(record):
