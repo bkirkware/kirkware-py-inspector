@@ -5,7 +5,7 @@ applications:
 - name: pyi-fs4-old-k8s
   memory: 512M
   disk_quota: 1G
-  instances: 3
+  instances: 1
   stack: cflinuxfs4
   buildpacks:
     - python_buildpack_1_8_102

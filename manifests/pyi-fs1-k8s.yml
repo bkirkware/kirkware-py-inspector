@@ -5,7 +5,7 @@ applications:
 - name: pyi-fs1-k8s
   memory: 512M
   disk_quota: 1G
-  instances: 3
+  instances: 1
   stack: tanzucflinuxfs1
   buildpacks:
     - python_buildpack
