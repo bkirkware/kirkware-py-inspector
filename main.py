@@ -22,12 +22,15 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
+import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_NAME = "kirkware-py-inspector"
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.13"
 START_TIME = time.time()
 HOST = os.environ.get("BIND", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -568,6 +571,489 @@ def platform_info():
     return {"cloud_foundry": cf, "kubernetes": k8s}
 
 
+# ------------------------------------------------- Tanzu Hub CVE enrichment
+#
+# Credentials come from a bound credhub service instance (label "credhub")
+# named `pyi-creds` (see the manifests' `services:` + README). Hub uses an
+# OAuth2 client_credentials grant for auth and a single GraphQL endpoint for
+# data. We identify *this* app in Hub by its CF app name, read the foundation
+# its VRN carries, and pull component vulnerabilities for that foundation —
+# the buildpack, the stack, and the platform runtime tile this app runs on.
+
+HUB_CACHE_TTL = int(os.environ.get("HUB_CACHE_TTL", "300"))  # 5 min
+HUB_PAGE_SIZE = 100
+
+# Triage states to include. Hub tracks each CVE's disposition; the default
+# "affected" states are EXPLOITABLE + UNKNOWN (not yet dispositioned) and
+# IN_TRIAGE. FALSE_POSITIVE / NOT_AFFECTED / RESOLVED / RESOLVED_WITH_PEDIGREE
+# are excluded so the counts reflect real exposure.
+HUB_TRIAGE_STATES = ["EXPLOITABLE", "IN_TRIAGE", "UNKNOWN"]
+
+# Platform runtime tile, per container runtime. Kubernetes is not modeled in
+# the TAS Hub vulnerability catalog yet (future work) -> "N/A".
+HUB_RUNTIME_TILE = os.environ.get("HUB_RUNTIME_TILE", "")
+
+# GraphQL: look this app up by name -> its VRN (which names its foundation).
+_GQL_APP = """
+query($first: Int, $names: [String!]) {
+  entityQuery {
+    queryEntities(entityName: $names, first: $first) {
+      edges { node { entityName entityId } }
+    }
+  }
+}
+"""
+
+# GraphQL: component vulnerabilities for one EDS type, scoped to a foundation,
+# with the per-severity CVE lists. `entityName` is a prefix filter upstream, so
+# we match exact name + version client-side below.
+_GQL_COMP = """
+query($f: ComponentFilterInput, $after: String, $first: Int) {
+  vulnerabilityQuery {
+    queryComponentVulnerabilities(componentFilter: $f, first: $first, after: $after) {
+      edges { node {
+        entityName currentVersion entityEdsType foundationName
+        criticalCveCount highCveCount latestPatchVersion
+        criticalCveList { cveId }
+        highCveList { cveId }
+      } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"""
+
+_hub_lock = threading.Lock()
+_hub_token = {"value": None, "expires": 0.0}
+_hub_cache = {"value": None, "expires": 0.0}
+
+
+def _hub_creds():
+    """Tanzu Hub credentials from the bound `pyi-creds` credhub service."""
+    raw = os.environ.get("VCAP_SERVICES")
+    if not raw:
+        return None
+    try:
+        for entries in json.loads(raw).values():
+            for e in entries:
+                if e.get("label") == "credhub":
+                    c = e.get("credentials", {})
+                    if c.get("TANZU_HUB_URL") and c.get("TANZU_HUB_SERVICE_ACCOUNT_ID"):
+                        return c
+    except Exception:
+        pass
+    return None
+
+
+def _hub_token_locked(creds):
+    base = creds["TANZU_HUB_URL"].rstrip("/")
+    now = time.time()
+    if _hub_token["value"] and now < _hub_token["expires"] - 60:
+        return _hub_token["value"]
+    body = urllib.parse.urlencode({
+        "grant_type": "client_credentials",
+        "client_id": creds["TANZU_HUB_SERVICE_ACCOUNT_ID"],
+        "client_secret": creds["TANZU_HUB_SERVICE_ACCOUNT_SECRET"],
+    }).encode()
+    req = urllib.request.Request(
+        base + "/auth/z/default/oauth/token", data=body, method="POST",
+        headers={"content-type": "application/x-www-form-urlencoded"})
+    r = urllib.request.urlopen(req, timeout=30)
+    data = json.loads(r.read())
+    _hub_token["value"] = data["access_token"]
+    _hub_token["expires"] = now + int(data.get("expires_in", 1800))
+    return _hub_token["value"]
+
+
+def _hub_gql(base, token, query, variables=None, timeout=30):
+    """POST a GraphQL query to the Hub's /hub/graphql endpoint. `base` is the
+    Hub origin (https://hub...); an optional HUB_URL_OVERRIDE replaces it (tests)."""
+    root = os.environ.get("HUB_URL_OVERRIDE") or base
+    req = urllib.request.Request(
+        root.rstrip("/") + "/hub/graphql",
+        data=json.dumps({"query": query, "variables": variables or {}}).encode(),
+        method="POST",
+        headers={"content-type": "application/json", "authorization": "Bearer " + token})
+    r = urllib.request.urlopen(req, timeout=timeout)
+    return json.loads(r.read())
+
+
+def _hub_component_cves(creds, base, token, foundation_id, eds_types, name_filter):
+    """All component-vulnerability rows for the given EDS types + foundation,
+    deduped by (name, version) and kept only when `name_filter(name, version)`
+    is true. Handles cursor pagination up to a bounded page count."""
+    filt = {"entityEdsType": eds_types, "foundationId": [foundation_id],
+            "triageState": HUB_TRIAGE_STATES}
+    nodes, after, pages = [], None, 0
+    while pages < 10:
+        pages += 1
+        r = _hub_gql(base, token, _GQL_COMP, {"f": filt, "after": after, "first": HUB_PAGE_SIZE})
+        if "errors" in r:
+            raise RuntimeError(r["errors"][0].get("message", "graphql error"))
+        p = r["data"]["vulnerabilityQuery"]["queryComponentVulnerabilities"]
+        nodes.extend(n["node"] for n in p["edges"])
+        if not p["pageInfo"]["hasNextPage"]:
+            break
+        after = p["pageInfo"]["endCursor"]
+    out, seen = [], set()
+    for n in nodes:
+        key = (n["entityName"], n["currentVersion"])
+        if key in seen:
+            continue
+        seen.add(key)
+        if name_filter and not name_filter(n["entityName"], n["currentVersion"]):
+            continue
+        out.append(n)
+    return out
+
+
+def _cve_ids(row, severity):
+    return [c.get("cveId") for c in (row.get(severity) or []) if c.get("cveId")]
+
+
+def _hub_build_cves(creds):
+    """Build the CVE payload for the buildpack / stack / runtime tile."""
+    app = {}
+    raw = os.environ.get("VCAP_APPLICATION")
+    if raw:
+        try:
+            app = json.loads(raw)
+        except Exception:
+            app = {}
+    app_name = app.get("application_name") or APP_NAME
+    stack = os.environ.get("APP_STACK") or _read("/etc/cf-stack")
+    buildpack_name = os.environ.get("BUILDPACK_NAME")
+    buildpack_version = os.environ.get("BUILDPACK_VERSION")
+    base = creds["TANZU_HUB_URL"].rstrip("/")
+
+    with _hub_lock:
+        token = _hub_token_locked(creds)
+
+        # 1) look *this* app up by name -> VRN -> foundation instance id
+        r = _hub_gql(base, token, _GQL_APP, {"first": 10, "names": [app_name]})
+        edges = (r.get("data", {}).get("entityQuery", {})
+                 .get("queryEntities", {}).get("edges", []))
+        vrn = None
+        for e in edges:
+            if e["node"]["entityName"] == app_name:
+                vrn = e["node"]["entityId"]
+                break
+        if vrn is None and edges:
+            vrn = edges[0]["node"]["entityId"]
+        if not vrn or "instance:" not in vrn:
+            return {"ok": False, "reason": "app not found in Hub",
+                    "app_name": app_name, "components": {}}
+        instance = vrn.split("instance:")[1].split("/")[0]
+        foundation_id = "vrn/provider:TAS/instance:%s/Foundation:%s" % (instance, instance)
+
+        # 2) buildpack CVEs for the buildpack that built this app
+        buildpack = {"ok": True, "name": buildpack_name, "version": buildpack_version,
+                     "matched": None}
+        if buildpack_name:
+            try:
+                rows = _hub_component_cves(creds, base, token, foundation_id,
+                                           ["Tanzu.TAS.Buildpack"],
+                                           lambda n, v: n == buildpack_name)
+                if rows:
+                    rows.sort(key=lambda n: 0 if n["currentVersion"] == buildpack_version else 1)
+                    buildpack["matched"] = _cve_row_summary(rows[0])
+                else:
+                    buildpack["ok"] = True
+            except Exception as e:
+                buildpack = {"ok": False, "name": buildpack_name, "reason": str(e)}
+
+        # 3) stack CVEs
+        stack_row = {"ok": True, "name": stack, "version": None, "matched": None}
+        if stack:
+            try:
+                rows = _hub_component_cves(creds, base, token, foundation_id,
+                                           ["Tanzu.TAS.Stack"],
+                                           lambda n, v: n == stack)
+                if rows:
+                    stack_row["matched"] = _cve_row_summary(rows[0])
+            except Exception as e:
+                stack_row = {"ok": False, "name": stack, "reason": str(e)}
+
+        # 4) platform runtime tile CVEs
+        runtime = {"ok": True, "name": HUB_RUNTIME_TILE or None, "matched": None}
+        if HUB_RUNTIME_TILE == "N/A" or not HUB_RUNTIME_TILE:
+            runtime = {"ok": True, "name": HUB_RUNTIME_TILE or "not set",
+                       "matched": None, "na": True}
+        else:
+            try:
+                rows = _hub_component_cves(creds, base, token, foundation_id,
+                                           ["Tanzu.TAS.Tile"],
+                                           lambda n, v: n == HUB_RUNTIME_TILE)
+                if rows:
+                    runtime["matched"] = _cve_row_summary(rows[0])
+            except Exception as e:
+                runtime = {"ok": False, "name": HUB_RUNTIME_TILE, "reason": str(e)}
+
+        return {
+            "ok": True,
+            "app_name": app_name,
+            "app_vrn": vrn,
+            "foundation_instance": instance,
+            "foundation_id": foundation_id,
+            "hub_url": base,
+            "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "components": {
+                "buildpack": buildpack,
+                "stack": stack_row,
+                "runtime": runtime,
+            },
+        }
+
+
+def _cve_row_summary(row):
+    """Shape one component-vulnerability row into the UI payload.
+
+    Hub exposes CVE *lists* only for critical + high severity (moderate/low
+    exist as counts on the raw engine fields, not as per-CVE lists)."""
+    return {
+        "name": row["entityName"],
+        "version": row["currentVersion"],
+        "latest_patch_version": row.get("latestPatchVersion"),
+        "foundation": row.get("foundationName"),
+        "counts": {
+            "critical": row.get("criticalCveCount", 0),
+            "high": row.get("highCveCount", 0),
+        },
+        "cves": {
+            "critical": _cve_ids(row, "criticalCveList"),
+            "high": _cve_ids(row, "highCveList"),
+        },
+    }
+
+
+def hub_cve_info():
+    """Tanzu Hub CVE enrichment, cached for HUB_CACHE_TTL seconds.
+
+    Never raises: any failure (no creds, network, GraphQL) returns a
+    structured {ok: false, reason} so the UI can show why.
+    """
+    now = time.time()
+    with _hub_lock:
+        if _hub_cache["value"] and now < _hub_cache["expires"]:
+            return _hub_cache["value"]
+    creds = _hub_creds()
+    if not creds:
+        return {"ok": False, "detected": False,
+                "reason": "no pyi-creds (credhub) service bound"}
+    try:
+        result = _hub_build_cves(creds)
+    except Exception as e:
+        result = {"ok": False, "reason": str(e)}
+    result["detected"] = True
+    with _hub_lock:
+        _hub_cache["value"] = result
+        _hub_cache["expires"] = now + HUB_CACHE_TTL
+    return result
+
+
+def _hub_warm():
+    """Background thread: warm the CVE cache at startup so the first UI load
+    doesn't pay the Hub round-trips."""
+    try:
+        hub_cve_info()
+    except Exception:
+        pass
+
+
+# ------------------------------------------------- OSV kernel CVE lookup
+# The stemcell itself is a node-level fact (not visible from inside the
+# container), but the host kernel we run on IS visible (/proc/version), and
+# its CVEs are tracked by the public OSV API. OSV indexes Ubuntu kernels by
+# SOURCE package (linux) + FULL Debian version (X.Y.Z-abi.upload, e.g.
+# 5.15.0-202.212) under the ecosystem string "Ubuntu:<VERSION_ID>:LTS".
+# `uname -r` alone (5.15.0-202-generic) is NOT queryable — it lacks the
+# upload number; the full version comes from /proc/version_signature.
+# Full pagination for a jammy 5.15 kernel is ~45 pages (~5 min), so the
+# lookup is a warm background thread behind a long cache (OSV_CACHE_TTL).
+OSV_API_URL = os.environ.get("OSV_API_URL", "https://api.osv.dev/v1/query")
+OSV_CACHE_TTL = int(os.environ.get("OSV_CACHE_TTL", "1800"))  # 30 min
+OSV_MAX_PAGES = int(os.environ.get("OSV_MAX_PAGES", "120"))
+OSV_PAGE_TIMEOUT = 60
+
+_osv_lock = threading.Lock()
+_osv_state = {
+    "value": None,        # finished payload (or None)
+    "expires": 0.0,
+    "building": False,
+    "count": 0,           # unique CVEs found so far (warming progress)
+}
+
+_OS_SEVERITY_RANK = {"critical": 5, "high": 4, "medium": 3, "low": 2,
+                     "negligible": 1, "unknown": 0}
+
+
+def _osv_kernel_query():
+    """OSV kernel-query inputs, or (None, reason) when not applicable.
+
+    Applicable only on Ubuntu-based stacks with a readable
+    /proc/version_signature (present on all modern Ubuntu/Debian kernels).
+    The distro for the OSV ecosystem comes from the KERNEL's own revision
+    (e.g. `~24.04.1`), not the container image's VERSION_ID — a VKS pod can
+    run a 24.04 kernel inside a 22.04 image, and OSV keys kernel data by the
+    kernel's distro. OSV labels LTS releases `Ubuntu:<distro>:LTS` and
+    interim releases `Ubuntu:<distro>` (no suffix)."""
+    rel = os_release()
+    if rel.get("ID") != "ubuntu":
+        return None, "not applicable (OSV kernel lookup covers Ubuntu stacks; this stack is %s)" % (rel.get("PRETTY_NAME") or "unknown")
+    sig = _read("/proc/version_signature") or ""
+    # Full Debian kernel version, optionally carrying a `~<year>.<minor>.<point>`
+    # distro revision (e.g. `6.17.0-29.29~24.04.1`). The `-generic` suffix is
+    # adjacent to the version (no space).
+    m = re.match(
+        r"Ubuntu\s+(\d+\.\d+\.\d+-\d+\.\d+(?:~[\d.]+)?)(?:-generic)?", sig)
+    if not m:
+        return None, "no /proc/version_signature on this kernel — full Debian kernel version unknown"
+    version = m.group(1)
+    dm = re.search(r"~(\d+\.\d+)\.\d+$", version)
+    if dm:
+        distro = dm.group(1)
+    else:
+        distro = rel.get("VERSION_ID") or ""
+    pm = re.match(r"(\d+)\.(\d+)", distro)
+    year, minor = (int(pm.group(1)), int(pm.group(2))) if pm else (0, 0)
+    if not distro:
+        return None, "could not determine the kernel distro revision"
+    lts = (year % 2 == 0 and minor == 4)
+    eco = "Ubuntu:%s%s" % (distro, ":LTS" if lts else "")
+    return {"ecosystem": eco, "name": "linux", "version": version}, None
+
+
+def _osv_max_severity(record):
+    best = 0
+    for s in record.get("severity") or []:
+        if isinstance(s, dict) and s.get("type") == "Ubuntu":
+            best = max(best, _OS_SEVERITY_RANK.get(str(s.get("score")).lower(), 0))
+    return best
+
+
+def _osv_slim(obj):
+    """JSON object_hook: drop the fields the kernel CVE lookup never uses.
+
+    OSV kernel records carry huge `affected[].versions` lists (tens of MB
+    per page — the whole kernel CVE universe) plus `ranges`, `details`,
+    `references`. The query already filtered by version, so we only need
+    id/severity/upstream/aliases/related. Trimming during parse keeps the
+    build's peak RSS ~278MB (measured, vs 827MB raw) instead of OOM'ing a
+    small instance. The fix-published set is resolved in a second, targeted
+    pass over the (rare) USN records — see _osv_build."""
+    for k in ("versions", "ranges", "affected", "details", "references"):
+        obj.pop(k, None)
+    return obj
+
+
+def _osv_build():
+    q, reason = _osv_kernel_query()
+    if q is None:
+        with _osv_lock:
+            _osv_state.update(value={"ok": False, "reason": reason,
+                                     "status": "not_applicable"},
+                              building=False, count=0,
+                              expires=time.time() + OSV_CACHE_TTL)
+        return
+    found = {}   # cve_id -> max severity rank
+    pages = 0
+    token = None
+    try:
+        while pages < OSV_MAX_PAGES:
+            pages += 1
+            body = {"package": {"ecosystem": q["ecosystem"], "name": q["name"]},
+                    "version": q["version"]}
+            if token:
+                body["page_token"] = token
+            req = urllib.request.Request(OSV_API_URL,
+                                         data=json.dumps(body).encode(),
+                                         method="POST",
+                                         headers={"content-type": "application/json"})
+            r = json.loads(urllib.request.urlopen(req, timeout=OSV_PAGE_TIMEOUT).read(),
+                           object_hook=_osv_slim)
+            for v in r.get("vulns") or []:
+                rank = _osv_max_severity(v)
+                # USN / UBUNTU-CVE records carry the CVE ids in `id` or
+                # `upstream` (and sometimes `aliases`/`related`); collect all.
+                ids = {v.get("id")} | set(v.get("upstream") or []) \
+                    | set(v.get("aliases") or []) | set(v.get("related") or [])
+                for i in ids:
+                    for c in re.findall(r"CVE-\d{4}-\d+", str(i or "")):
+                        cur = found.get(c)
+                        if cur is None or rank > cur:
+                            found[c] = rank
+            token = r.get("next_page_token")
+            if not token:
+                break
+            with _osv_lock:
+                _osv_state["count"] = len(found)
+    except Exception as e:
+        with _osv_lock:
+            _osv_state.update(value={"ok": False, "reason": str(e),
+                                     "status": "error", "pages": pages},
+                              building=False,
+                              expires=time.time() + 300)  # retry in 5 min
+        return
+    # Keep only critical + high: the row lists those (and the user doesn't
+    # want medium/low/negligible surfaced, nor a fix-published split).
+    sev_rank = {_OS_SEVERITY_RANK[k]: k for k in _OS_SEVERITY_RANK}
+    cves = {"critical": [], "high": []}
+    for c, rank in found.items():
+        name = sev_rank.get(rank)
+        if name in cves:
+            cves[name].append(c)
+    for k in cves:
+        cves[k].sort()
+    value = {
+        "ok": True,
+        "status": "ok" if not token else "partial",
+        "source": "OSV (api.osv.dev)",
+        "ecosystem": q["ecosystem"],
+        "package": q["name"],
+        "version": q["version"],
+        "pages": pages,
+        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "cves": cves,
+    }
+    with _osv_lock:
+        _osv_state.update(value=value, expires=time.time() + OSV_CACHE_TTL,
+                          building=False, count=len(found))
+
+
+def kernel_cve_info():
+    """Kernel CVE enrichment via the public OSV API.
+
+    Never blocks on the (slow) full pagination: the first caller starts a
+    daemon builder thread and immediately returns a live 'warming' snapshot
+    with the running count; later callers read the cached result."""
+    now = time.time()
+    with _osv_lock:
+        if _osv_state["value"] and now < _osv_state["expires"]:
+            return _osv_state["value"]
+        if _osv_state["building"]:
+            return {"ok": False, "status": "warming", "count": _osv_state["count"],
+                    "reason": "querying OSV"}
+        _osv_state["building"] = True
+        _osv_state["count"] = 0
+        threading.Thread(target=_osv_build, daemon=True).start()
+        return {"ok": False, "status": "warming", "count": 0,
+                "reason": "querying OSV"}
+
+
+def _osv_warm():
+    """Background thread: warm the OSV kernel-CVE cache at startup.
+
+    Runs AFTER the Hub CVE warm: both warmers parse large JSON payloads, and
+    starting them concurrently pushed a 128M app instance over its limit
+    (exit 137 / OOM). Serializing the two keeps the startup memory peak flat.
+    """
+    try:
+        hub_cve_info()   # block until the Hub warm is done (it caches)
+        kernel_cve_info()
+    except Exception:
+        pass
+
+
 # -------------------------------------------------------------- env + misc
 
 SECRET_RE = re.compile(r"(TOKEN|SECRET|PASSW|CRED|KEY|AUTH|PRIVATE)", re.I)
@@ -643,6 +1129,8 @@ def collect_info():
         },
         "network": network_info(),
         "environment_variables": env_info(),
+        "cve": hub_cve_info(),
+        "kernel_cve": kernel_cve_info(),
         "versions": {
             "python": platform.python_version(),
             "cf_cli": _sh(["cf", "--version"]),
@@ -748,6 +1236,7 @@ PAGE = """<!doctype html>
   .tag.success{ background: var(--cds-alias-status-success-tint); color: var(--cds-alias-status-success); }
   .tag.warning{ background: var(--cds-alias-status-warning-tint); color: var(--cds-color-ochre-800); }
   .tag.neutral{ background: var(--cds-alias-status-neutral-tint); color: var(--cds-alias-status-neutral); }
+  .tag.off    { background: var(--cds-color-construction-100); color: var(--cds-color-construction-500); }
   .tag.k8s    { background: #e9effd; color: var(--cds-color-k8s); }
 
   /* ---- key/value table (Clarity detail rows) ---- */
@@ -815,6 +1304,7 @@ PAGE = """<!doctype html>
 <header class="app">
   <div class="brand"><span class="mark" id="brandicon"></span>Runtime Inspector<span class="ver" id="ver"></span></div>
   <span class="spacer"></span>
+  <span class="tag" id="hub" title="Tanzu Hub credential binding">…</span>
   <span class="tag" id="runtime">…</span>
   <button class="btn ghost" onclick="load()">↻ Refresh</button>
   <button class="btn ghost" onclick="copyJson()">Copy JSON</button>
@@ -824,7 +1314,7 @@ PAGE = """<!doctype html>
   <nav class="crumbs"><a href="#">Home</a><span> / </span><span class="here">Runtime Inspector</span></nav>
   <div class="stack" id="grid"><div class="muted" style="padding:24px">Loading infrastructure data…</div></div>
 </main>
-<footer>collected live from the process environment · no external calls · secrets masked · design: VMware Clarity (light)</footer>
+<footer>collected live from the process environment · CVEs from Tanzu Hub · secrets masked · design: VMware Clarity (light)</footer>
 <script>
 let DATA = null;
 const esc = s => String(s ?? "—").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -853,6 +1343,70 @@ function card(title, icon, tagText, tagCls, body) {
 function acc(label, inner) {
   return `<div class="acc"><button class="acc-hd" type="button" onclick="this.parentElement.classList.toggle('open')"><span class="acc-caret">▸</span>${esc(label)}</button><div class="acc-bd">${inner}</div></div>`;
 }
+// Tanzu Hub CVE accordion. `comp` = {ok, name, matched:{name,version,counts,cves,latest_patch_version}, na}.
+// `cve` = top-level hub result; when !cve.ok we surface the reason.
+function cveBlock(label, comp, cve, naMsg) {
+  if (!cve || cve.detected === false) {
+    return acc(label + ' — CVEs (Tanzu Hub)',
+      `<div class="muted" style="padding:10px 18px">Tanzu Hub not configured — bind the <span style="font-family:var(--cds-font-mono)">pyi-creds</span> credhub service (with the Hub service-account credentials) to enable CVE data.</div>`);
+  }
+  if (!cve.ok) {
+    return acc(label + ' — CVEs (Tanzu Hub)',
+      `<div class="muted" style="padding:10px 18px">unavailable — ${esc(cve.reason || 'unknown error')}</div>`);
+  }
+  comp = comp || {};
+  const m = comp.matched;
+  let header = label + ' — CVEs (Tanzu Hub)';
+  if (comp.na) header += ' — N/A';
+  else if (m) header += ' — ' + m.name + ' ' + (m.version || '') + ' · ' + m.counts.critical + ' critical · ' + m.counts.high + ' high';
+  let body;
+  if (comp.na) {
+    body = `<div class="muted" style="padding:10px 18px">${esc(naMsg || 'Not applicable for this runtime.')}</div>`;
+  } else if (!m) {
+    body = `<div class="muted" style="padding:10px 18px">No CVEs reported for ${esc(comp.name || 'this component')} in Tanzu Hub.</div>`;
+  } else {
+    const parts = [];
+    for (const [key, tagcls] of [['critical','warning'],['high','info']]) {
+      const list = (m.cves && m.cves[key]) || [];
+      if (list.length) parts.push(`<div style="margin:6px 0"><span class="tag ${tagcls}">${key} · ${list.length}</span><pre>${esc(list.join('\\n'))}</pre></div>`);
+    }
+    body = parts.length ? parts.join('') : `<div class="muted" style="padding:10px 18px">No open CVEs.</div>`;
+    if (m.latest_patch_version) body += `<div class="muted" style="padding:0 18px">latest patch version: <span style="font-family:var(--cds-font-mono)">${esc(m.latest_patch_version)}</span></div>`;
+  }
+  return acc(header, body);
+}
+
+// Stemcell - CVEs (OSV) accordion. The stemcell itself is a node-level fact
+// (invisible from inside the container), but its *kernel* is — so this row
+// looks up Linux kernel CVEs for the running kernel via the public OSV API
+// (Ubuntu `linux` source package, full Debian version). `k` = kernel_cve.
+function osvBlock(k) {
+  const label = 'Stemcell - CVEs (OSV)';
+  if (!k) return acc(label,
+    `<div class="muted" style="padding:10px 18px">no data</div>`);
+  if (k.status === 'warming') {
+    const n = k.count || 0;
+    return acc(label + ' — querying OSV…',
+      `<div class="muted" style="padding:10px 18px">First load: querying the public OSV API for this kernel's CVEs (this can take a few minutes). ${n ? 'Found ' + n + ' CVEs so far.' : 'Fetching page 1…'}<br>Refresh the page once the warm-up completes (result is then cached).</div>`);
+  }
+  if (!k.ok) {
+    return acc(label,
+      `<div class="muted" style="padding:10px 18px">${esc(k.reason || 'unavailable')}</div>`);
+  }
+  const cves = k.cves || {};
+  const nCrit = (cves.critical || []).length;
+  const nHigh = (cves.high || []).length;
+  const sevSummary = `${nCrit} critical · ${nHigh} high`;
+  let body = `<div class="muted" style="padding:10px 18px 4px">${sevSummary} kernel CVEs for ${esc(k.version)} (source pkg <span style="font-family:var(--cds-font-mono)">${esc(k.package)}</span> on ${esc(k.ecosystem)}, via ${esc(k.source)}; medium and below are not shown)${k.status === 'partial' ? ' — <em>partial: page cap reached</em>' : ''}</div>`;
+  const parts = [];
+  for (const [key, tagcls] of [['critical', 'warning'], ['high', 'info']]) {
+    const list = cves[key] || [];
+    if (list.length) parts.push(`<div style="margin:6px 0"><span class="tag ${tagcls}">${key} · ${list.length}</span><pre>${esc(list.join('\\n'))}</pre></div>`);
+  }
+  body += parts.length ? parts.join('') : `<div class="muted" style="padding:6px 18px">No critical or high-severity kernel CVEs.</div>`;
+  body += `<div class="muted" style="padding:0 18px 10px">Fetched ${esc(k.fetched_at)}.</div>`;
+  return acc(label + ' — ' + (k.version || '') + ' · ' + sevSummary, body);
+}
 
 function render(d) {
   const g = document.getElementById('grid');
@@ -865,11 +1419,30 @@ function render(d) {
 
   const sec = d.security;
   const inst = d.instance;
+  const cve = d.cve || {ok:false, reason:'no data'};
+  const kernel = d.kernel_cve || {ok:false, reason:'no data'};
   const cf = sec.platform.cloud_foundry, k8s = sec.platform.kubernetes;
   const os = sec.os_stack, ct = sec.container;
   const app = sec.application_layer, br = sec.buildpack_runtime || {};
+  // Stack version (e.g. cflinuxfs4 1.374.0) comes from the Hub CVE component
+  // match; only present when Hub is detected + the stack resolved a row.
+  const stackComp = (cve && cve.ok) ? (cve.components || {}).stack : null;
+  const stackVer = (stackComp && stackComp.matched && stackComp.matched.version)
+    ? stackComp.matched.version : null;
   br.buildpack = br.buildpack || {};
   br.buildpack_dep_layers = br.buildpack_dep_layers || [];
+  // Tanzu Hub detection: on when the pyi-creds binding (Hub service-account
+  // credentials) is present, off otherwise.
+  const hubEl = document.getElementById('hub');
+  if (cve && cve.detected) {
+    hubEl.className = 'tag success';
+    hubEl.title = 'Tanzu Hub: ' + (cve.foundation_id || 'connected');
+    hubEl.innerHTML = ICONS.shield + 'Tanzu Hub';
+  } else {
+    hubEl.className = 'tag off';
+    hubEl.title = 'No Tanzu Hub credential binding (pyi-creds)';
+    hubEl.innerHTML = ICONS.shield + 'Tanzu Hub off';
+  }
 
   // ---- 1. Summary (group: Container Instance + Layer Summary) ----
   const idxLabel = inst.index !== null && inst.index !== undefined ? '#' + inst.index : '—';
@@ -890,7 +1463,7 @@ function render(d) {
       ['Application Layer', app.application.name + ' — v' + app.application.app_version],
       ['App Runtime', br.python ? br.python.version + ' (' + br.python.implementation + ')' : 'unknown'],
       ['Buildpack', (br.buildpack.name || 'unknown') + ' — v' + (br.buildpack.version || 'unknown')],
-      ['Stack', os.stack || 'unknown'],
+      ['Stack', (os.stack || 'unknown') + (stackVer ? ' — v' + stackVer : '')],
       ['OS release', osRelease],
       ['OS Kernel', os.kernel + ' (' + os.arch + ')'],
     ])}</table>`);
@@ -942,6 +1515,7 @@ function render(d) {
       acc('buildpack layer ' + l.layer + ' — ' + l.tools.length + ' tools',
         `<pre>${esc(l.tools.join('\\n') || 'no bin/ tools')}</pre>`)).join('');
   }
+  bpBody += cveBlock('Buildpack', (cve.components && cve.components.buildpack) || {}, cve);
   secPanels.push(card('Buildpack (runtime)', 'python', 'python_buildpack', 'neutral', bpBody));
 
   // 2.4 Stack (root filesystem)
@@ -953,11 +1527,15 @@ function render(d) {
     ['Kernel', os.kernel + ' (' + os.arch + ')'],
     ['glibc', os.glibc],
     ['Hardening', h ? h.summary.join(' · ') : null],
-    ['Stemcell', 'node-level fact — not visible from inside the container'],
   ])}</table>`;
   if (ct.cgroups && ct.cgroups.length > 1) {
     stackBody += acc('all cgroups', `<pre>${esc(ct.cgroups.join('\\n'))}</pre>`);
   }
+  stackBody += cveBlock('Stack', (cve.components && cve.components.stack) || {}, cve);
+  // Stemcell - CVEs (OSV): the stemcell is a node-level fact we can't see from
+  // inside the container, but its kernel is. Look up Linux kernel CVEs for the
+  // running kernel via the public OSV API (Ubuntu linux source package).
+  stackBody += osvBlock(kernel);
   secPanels.push(card('Stack (root filesystem)', 'ubuntu', os.distribution, 'neutral', stackBody));
 
   // 2.5 Container platform
@@ -968,11 +1546,7 @@ function render(d) {
   ];
   const k8sRows = [
     ['API server', k8s.api_server.host ? k8s.api_server.host + ':' + k8s.api_server.port : null],
-    ['Namespace', k8s.service_account.namespace || k8s.namespace_env || null],
-    ['Service account', k8s.service_account.name],
     ['SA token', k8s.service_account.token_present ? 'mounted' : (k8s.api_server.host ? 'not mounted (no API access from container)' : null)],
-    ['ca.crt', k8s.service_account.ca_cert_present ? 'present' : null],
-    ['JWT subject', k8s.service_account.jwt_sub],
     ['K8s env vars', Object.keys(k8s.env).length ? Object.entries(k8s.env).map(([k, v]) => k + '=' + v).join('; ') : null],
     ['k8s-app-entrypoint', ct.k8s_entrypoint_config ? 'present' : null],
     ['Org / Space', app.application.organization ? app.application.organization + ' / ' + app.application.space : null],
@@ -995,8 +1569,8 @@ function render(d) {
       ['App ID', cf.application && cf.application.application_id],
       ['Org / Space', app.application.organization ? app.application.organization + ' / ' + app.application.space : null],
       ['Uris', cf.application && (cf.application.application_uris || []).join(', ')],
-      ['CF API', app.application.cf_api],
-      ['Build ID', app.application.build_id],
+      ['CF API', cf.application && cf.application.cf_api],
+      ['Build ID', cf.application && cf.application.build_id],
       ['Services', cf.services.map(s => s.name + ' [' + s.label + ':' + s.plan + ']').join(', ') || null],
       ['Buildpack dep layers', cf.buildpack_dep_layers.map(l => l.layer + ' (' + l.tools.length + ' tools)').join('  ') || null],
     ].concat(containerRows))}</table>`;
@@ -1006,6 +1580,10 @@ function render(d) {
     platTag = 'detected';
     platCls = 'info';
   }
+  // Platform runtime tile CVEs (Tanzu Hub) live in this panel, not a separate one.
+  const rtComp = (cve.components && cve.components.runtime) || {};
+  platBody += cveBlock('Container Runtime', rtComp, cve,
+    'Platform runtime CVEs are not tracked for Kubernetes in Tanzu Hub yet.');
   secPanels.push(card('Container platform', k8s.detected ? 'k8s' : 'cf', platTag, platCls, platBody));
 
   panels.push(`<div class="sec-group"><h2>${ICONS.shield}Security</h2><div class="stack">${secPanels.join('')}</div></div>`);
@@ -1085,6 +1663,11 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     sys.stderr.write("%s %s listening on %s:%d\n" % (APP_NAME, APP_VERSION, HOST, PORT))
+    # Warm the Tanzu Hub CVE cache in the background so the first page load
+    # isn't blocked on the Hub round-trips. The OSV kernel-CVE warm runs in
+    # parallel (its own thread, ~5 min of pagination, cached 30 min).
+    threading.Thread(target=_hub_warm, daemon=True).start()
+    threading.Thread(target=_osv_warm, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

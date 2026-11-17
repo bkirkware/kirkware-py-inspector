@@ -1,0 +1,29 @@
+---
+# pyi-clarity-dev-oldstem — DEVELOPMENT deployment (older-stemcell VM Diego).
+# Companion to pyi-clarity-dev (cody) and pyi-clarity-dev-k8s (cody-k8s).
+# Space: cody-older-stemcell (VM-based Diego, older stemcell).
+# Review URL: pyi-clarity-oldstem.apps.tanzu.kirkware.net
+# Container runtime CVE tile for this space: Resource Segment (see deploy.sh).
+applications:
+- name: pyi-clarity-dev-oldstem
+  memory: 512M
+  disk_quota: 1G
+  instances: 1
+  stack: cflinuxfs4
+  buildpacks:
+    - python_buildpack
+  command: python3 main.py
+  # Tanzu Hub credentials for CVE enrichment (bound on push).
+  services:
+    - pyi-creds
+  routes:
+    - route: pyi-clarity-oldstem.apps.tanzu.kirkware.net
+  # Where this app is stored. CF droplets drop .git, so the app reads these
+  # from the environment; deploy.sh stamps the live values at push time.
+  env:
+    GIT_REPO_URL: "https://github.com/bkirkware/kirkware-py-inspector.git"
+    GIT_COMMIT: "unknown"
+    BUILDPACK_NAME: ""
+    BUILDPACK_VERSION: ""
+    APP_STACK: ""
+    HUB_RUNTIME_TILE: ""
