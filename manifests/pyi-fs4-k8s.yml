@@ -3,7 +3,7 @@
 # Route: pyi-fs4-k8s.apps.tanzu.kirkware.net
 applications:
 - name: pyi-fs4-k8s
-  memory: 256M
+  memory: 512M
   disk_quota: 1G
   instances: 3
   stack: cflinuxfs4

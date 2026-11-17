@@ -6,7 +6,7 @@
 # Container runtime CVE tile for this space: Resource Segment (see deploy.sh).
 applications:
 - name: pyi-clarity-dev-oldstem
-  memory: 256M
+  memory: 512M
   disk_quota: 1G
   instances: 1
   stack: cflinuxfs4

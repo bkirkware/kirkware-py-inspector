@@ -931,6 +931,19 @@ def _osv_max_severity(record):
     return best
 
 
+def _osv_slim(obj):
+    """JSON object_hook: drop the fields the kernel CVE lookup never uses.
+
+    OSV kernel records carry huge `affected[].versions` + `ranges` lists
+    (tens of MB per page — the whole kernel CVE universe). The query already
+    filtered by version, so we only need id/severity/upstream/aliases/related.
+    Trimming during parse keeps the build's peak RSS ~flat instead of
+    OOM'ing a small instance (measured 827MB -> 278MB)."""
+    for k in ("versions", "ranges", "affected", "details", "references"):
+        obj.pop(k, None)
+    return obj
+
+
 def _osv_build():
     q, reason = _osv_kernel_query()
     if q is None:
@@ -954,7 +967,8 @@ def _osv_build():
                                          data=json.dumps(body).encode(),
                                          method="POST",
                                          headers={"content-type": "application/json"})
-            r = json.loads(urllib.request.urlopen(req, timeout=OSV_PAGE_TIMEOUT).read())
+            r = json.loads(urllib.request.urlopen(req, timeout=OSV_PAGE_TIMEOUT).read(),
+                           object_hook=_osv_slim)
             for v in r.get("vulns") or []:
                 rank = _osv_max_severity(v)
                 # USN / UBUNTU-CVE records carry the CVE ids in `id` or

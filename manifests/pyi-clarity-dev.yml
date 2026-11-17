@@ -5,7 +5,7 @@
 # Production matrix: see pyi-fs4 / pyi-fs1 / pyi-fs4-old (+ -k8s variants).
 applications:
 - name: pyi-clarity-dev
-  memory: 256M
+  memory: 512M
   disk_quota: 1G
   instances: 1
   stack: cflinuxfs4

@@ -3,7 +3,7 @@
 # Route: pyi-fs1.apps.tanzu.kirkware.net
 applications:
 - name: pyi-fs1
-  memory: 256M
+  memory: 512M
   disk_quota: 1G
   instances: 3
   stack: tanzucflinuxfs1
