@@ -12,8 +12,8 @@ UI sections, one panel per row:
 1. **Container Instance** — the instance number as a large hero display,
    plus instance GUID, hostname, internal/external IP, started-at +
    human-friendly uptime, PID 1, cgroup.
-2. **Security** — a group of five sub-panels:
-   - *Application Layer* — app name/version, app ID, routes, org/space,
+2. **Security** — a group of sub-panels:
+   - *Application Layer* — app name/version, app id, routes, org/space,
      CF API, process type, build ID, git repository origin + commit;
      **Environment Variables folded in as a collapsible pull-down**
      (secrets masked).
@@ -21,15 +21,21 @@ UI sections, one panel per row:
      (direct vs transitive, with the requirement edges that pulled each in).
    - *Buildpack (runtime)* — Python runtime (version, implementation,
      executable, build string), pip/setuptools, buildpack dependency layers
-     and the tools each provides.
+     and the tools each provides, plus a **CVE row** listing the CVEs
+     Tanzu Hub reports for the buildpack that built this app.
    - *Stack (root filesystem)* — distribution, OS release, CF stack, kernel,
      glibc, container hardening posture (seccomp, NoNewPrivs, capabilities,
      AppArmor visibility). Stemcell is a node-level fact and is not
-     observable from inside the container — the panel says so.
+     observable from inside the container — the panel says so. Includes a
+     **CVE row** for the stack's root filesystem.
    - *Container platform* — Cloud Foundry (app id, uris, build, services,
      buildpack layers) and/or Kubernetes (API server, service account,
      namespace, JWT claims, k8s-app-entrypoint config). On CF-on-K8s the
      Kubernetes facts lead and the CF overlay is shown in a collapsible.
+   - *Container Runtime* — a **CVE row** for the platform runtime tile this
+     app runs on (per space): `Small Footprint Elastic Application Runtime`
+     (cody), `Resource Segment` (cody-older-stemcell), or `N/A` (cody-k8s —
+     Kubernetes runtime is not in the TAS Hub catalog yet).
 3. **Networking** — hostname + resolution, default route, DNS, listening
    sockets, per-interface detail (MAC/MTU/state/addresses), routes.
 4. **Infrastructure** — node-level resources: CPU (count × model), memory
@@ -44,8 +50,66 @@ official colors), and app uptime in human form (e.g. `2d 3h 14m`).
 - **API:** `GET /api/info` — full JSON
 - **Health:** `GET /healthz`
 
-No third-party dependencies; everything is read from `/proc`, `/sys`,
-`/etc`, and the process environment. No outbound network calls.
+No third-party dependencies; everything is read from `/proc`, `/sys`, `/etc`,
+and the process environment. The only outbound calls are to **Tanzu Hub** for
+CVE enrichment, and only when the `pyi-creds` credhub service is bound (see
+below); with no bound service the CVE rows simply show "unavailable".
+
+## Tanzu Hub CVE enrichment — fresh deploy
+
+The Buildpack, Stack, and Container Runtime panels each show the CVEs Tanzu
+Hub reports for that component. To make this work you need a **`pyi-creds`
+credhub service instance in every space you deploy to** — the app reads the
+Hub credentials from that bound service (it does not take them from env).
+
+1. **Target the foundation API endpoint** and log in with a space operator:
+
+   ```sh
+   cf api https://api.sys.tanzu.kirkware.net --skip-ssl-validation
+   cf login -u <space-operator> -p <password>
+   cf target -o kirkware-devs -s cody
+   ```
+
+2. **Create the credential params file** (kept in `hidden/`, git-ignored). The
+   values are your Tanzu Hub service account credentials:
+
+   ```sh
+   mkdir -p hidden
+   cat > hidden/pyi-creds.json <<'JSON'
+   {
+     "TANZU_HUB_URL": "https://hub.tanzu.kirkware.net",
+     "TANZU_HUB_SERVICE_ACCOUNT_ID": "<service_account_id>",
+     "TANZU_HUB_SERVICE_ACCOUNT_SECRET": "<service_account_secret>",
+     "TANZU_HUB_CLIENT_SECRET": "<client_secret>"
+   }
+   JSON
+   ```
+
+3. **Create the `pyi-creds` credhub service in each space** (one per space; do
+   not use the cross-foundation plan — target the foundation endpoint as in
+   step 1 so `credhub default` resolves per-foundation):
+
+   ```sh
+   for SPACE in cody cody-k8s cody-older-stemcell; do
+     cf target -o kirkware-devs -s "$SPACE"
+     cf create-service credhub default pyi-creds -c hidden/pyi-creds.json
+   done
+   ```
+
+4. **Deploy.** Every manifest declares `services: [pyi-creds]`, so `cf push`
+   (or `./deploy.sh`) binds the service on push — the app picks the
+   credentials up from `VCAP_SERVICES` and needs no further configuration.
+
+Notes:
+- `TANZU_HUB_CLIENT_SECRET` is the `key_…` client-assertion JWT from your
+  service account; only the ID + secret are used for the `client_credentials`
+  token grant (see the service account details from your Hub admin).
+- The app identifies *itself* in Hub by its CF app name, resolves the
+  foundation its VRN carries, and scopes buildpack/stack/runtime CVEs to that
+  foundation. Results are cached for 5 minutes (tune with `HUB_CACHE_TTL`).
+- The platform runtime tile is stamped per space by `deploy.sh`
+  (`HUB_RUNTIME_TILE`): cody → `Small Footprint Elastic Application Runtime`,
+  cody-older-stemcell → `Resource Segment`, cody-k8s → `N/A`.
 
 ## Run locally
 
@@ -88,6 +152,7 @@ older stemcell; its `-oldstem` apps compare node-age against `cody`'s.
 Development deployments (1 instance, `manifests/pyi-clarity-dev*.yml`):
 - `pyi-clarity-dev` in `cody` → pyi-clarity.apps.tanzu.kirkware.net
 - `pyi-clarity-dev-k8s` in `cody-k8s` → pyi-clarity-k8s.apps.tanzu.kirkware.net
+- `pyi-clarity-dev-oldstem` in `cody-older-stemcell` → pyi-clarity-oldstem.apps.tanzu.kirkware.net
 
 Test matrix used for this app:
 - VM-based Diego cells → org `kirkware-devs`, space `cody`
