@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_NAME = "kirkware-py-inspector"
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.0.10"
 START_TIME = time.time()
 HOST = os.environ.get("BIND", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -860,6 +860,157 @@ def _hub_warm():
         pass
 
 
+# ------------------------------------------------- OSV kernel CVE lookup
+# The stemcell itself is a node-level fact (not visible from inside the
+# container), but the host kernel we run on IS visible (/proc/version), and
+# its CVEs are tracked by the public OSV API. OSV indexes Ubuntu kernels by
+# SOURCE package (linux) + FULL Debian version (X.Y.Z-abi.upload, e.g.
+# 5.15.0-202.212) under the ecosystem string "Ubuntu:<VERSION_ID>:LTS".
+# `uname -r` alone (5.15.0-202-generic) is NOT queryable — it lacks the
+# upload number; the full version comes from /proc/version_signature.
+# Full pagination for a jammy 5.15 kernel is ~45 pages (~5 min), so the
+# lookup is a warm background thread behind a long cache (OSV_CACHE_TTL).
+OSV_API_URL = os.environ.get("OSV_API_URL", "https://api.osv.dev/v1/query")
+OSV_CACHE_TTL = int(os.environ.get("OSV_CACHE_TTL", "1800"))  # 30 min
+OSV_MAX_PAGES = int(os.environ.get("OSV_MAX_PAGES", "120"))
+OSV_PAGE_TIMEOUT = 60
+
+_osv_lock = threading.Lock()
+_osv_state = {
+    "value": None,        # finished payload (or None)
+    "expires": 0.0,
+    "building": False,
+    "count": 0,           # unique CVEs found so far (warming progress)
+}
+
+_OS_SEVERITY_RANK = {"critical": 5, "high": 4, "medium": 3, "low": 2,
+                     "negligible": 1, "unknown": 0}
+
+
+def _osv_kernel_query():
+    """OSV kernel-query inputs, or (None, reason) when not applicable.
+
+    Applicable only on Ubuntu-based stacks with a readable
+    /proc/version_signature (present on all modern Ubuntu/Debian kernels)."""
+    rel = os_release()
+    if rel.get("ID") != "ubuntu":
+        return None, "not applicable (OSV kernel lookup covers Ubuntu stacks; this stack is %s)" % (rel.get("PRETTY_NAME") or "unknown")
+    sig = _read("/proc/version_signature") or ""
+    m = re.match(r"Ubuntu\s+(\d+\.\d+\.\d+-\d+\.\d+)-generic", sig)
+    if not m:
+        return None, "no /proc/version_signature on this kernel — full Debian kernel version unknown"
+    eco = "Ubuntu:%s:LTS" % rel["VERSION_ID"]
+    return {"ecosystem": eco, "name": "linux", "version": m.group(1)}, None
+
+
+def _osv_max_severity(record):
+    best = 0
+    for s in record.get("severity") or []:
+        if isinstance(s, dict) and s.get("type") == "Ubuntu":
+            best = max(best, _OS_SEVERITY_RANK.get(str(s.get("score")).lower(), 0))
+    return best
+
+
+def _osv_build():
+    q, reason = _osv_kernel_query()
+    if q is None:
+        with _osv_lock:
+            _osv_state.update(value={"ok": False, "reason": reason,
+                                     "status": "not_applicable"},
+                              building=False, count=0,
+                              expires=time.time() + OSV_CACHE_TTL)
+        return
+    found = {}   # cve_id -> max severity rank
+    pages = 0
+    token = None
+    try:
+        while pages < OSV_MAX_PAGES:
+            pages += 1
+            body = {"package": {"ecosystem": q["ecosystem"], "name": q["name"]},
+                    "version": q["version"]}
+            if token:
+                body["page_token"] = token
+            req = urllib.request.Request(OSV_API_URL,
+                                         data=json.dumps(body).encode(),
+                                         method="POST",
+                                         headers={"content-type": "application/json"})
+            r = json.loads(urllib.request.urlopen(req, timeout=OSV_PAGE_TIMEOUT).read())
+            for v in r.get("vulns") or []:
+                rank = _osv_max_severity(v)
+                # USN / UBUNTU-CVE records carry the CVE ids in `id` or
+                # `upstream` (and sometimes `aliases`/`related`); collect all.
+                ids = {v.get("id")} | set(v.get("upstream") or []) \
+                    | set(v.get("aliases") or []) | set(v.get("related") or [])
+                for i in ids:
+                    for c in re.findall(r"CVE-\d{4}-\d+", str(i or "")):
+                        cur = found.get(c)
+                        if cur is None or rank > cur:
+                            found[c] = rank
+            token = r.get("next_page_token")
+            if not token:
+                break
+            with _osv_lock:
+                _osv_state["count"] = len(found)
+    except Exception as e:
+        with _osv_lock:
+            _osv_state.update(value={"ok": False, "reason": str(e),
+                                     "status": "error", "pages": pages},
+                              building=False,
+                              expires=time.time() + 300)  # retry in 5 min
+        return
+    sev_rank = {_OS_SEVERITY_RANK[k]: k for k in _OS_SEVERITY_RANK}
+    buckets = {k: [] for k in _OS_SEVERITY_RANK}
+    for c, rank in found.items():
+        buckets[sev_rank.get(rank, "unknown")].append(c)
+    for k in buckets:
+        buckets[k].sort()
+    value = {
+        "ok": True,
+        "status": "ok" if not token else "partial",
+        "source": "OSV (api.osv.dev)",
+        "ecosystem": q["ecosystem"],
+        "package": q["name"],
+        "version": q["version"],
+        "pages": pages,
+        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "total": len(found),
+        "counts": {k: len(buckets[k]) for k in
+                   ("critical", "high", "medium", "low", "negligible")},
+        "cves": {k: buckets[k] for k in ("critical", "high")},
+    }
+    with _osv_lock:
+        _osv_state.update(value=value, expires=time.time() + OSV_CACHE_TTL,
+                          building=False, count=len(found))
+
+
+def kernel_cve_info():
+    """Kernel CVE enrichment via the public OSV API.
+
+    Never blocks on the (slow) full pagination: the first caller starts a
+    daemon builder thread and immediately returns a live 'warming' snapshot
+    with the running count; later callers read the cached result."""
+    now = time.time()
+    with _osv_lock:
+        if _osv_state["value"] and now < _osv_state["expires"]:
+            return _osv_state["value"]
+        if _osv_state["building"]:
+            return {"ok": False, "status": "warming", "count": _osv_state["count"],
+                    "reason": "querying OSV"}
+        _osv_state["building"] = True
+        _osv_state["count"] = 0
+        threading.Thread(target=_osv_build, daemon=True).start()
+        return {"ok": False, "status": "warming", "count": 0,
+                "reason": "querying OSV"}
+
+
+def _osv_warm():
+    """Background thread: warm the OSV kernel-CVE cache at startup."""
+    try:
+        kernel_cve_info()
+    except Exception:
+        pass
+
+
 # -------------------------------------------------------------- env + misc
 
 SECRET_RE = re.compile(r"(TOKEN|SECRET|PASSW|CRED|KEY|AUTH|PRIVATE)", re.I)
@@ -936,6 +1087,7 @@ def collect_info():
         "network": network_info(),
         "environment_variables": env_info(),
         "cve": hub_cve_info(),
+        "kernel_cve": kernel_cve_info(),
         "versions": {
             "python": platform.python_version(),
             "cf_cli": _sh(["cf", "--version"]),
@@ -1181,6 +1333,36 @@ function cveBlock(label, comp, cve, naMsg) {
   return acc(header, body);
 }
 
+// Stemcell - CVEs (OSV) accordion. The stemcell itself is a node-level fact
+// (invisible from inside the container), but its *kernel* is — so this row
+// looks up Linux kernel CVEs for the running kernel via the public OSV API
+// (Ubuntu `linux` source package, full Debian version). `k` = kernel_cve.
+function osvBlock(k) {
+  const label = 'Stemcell - CVEs (OSV)';
+  if (!k) return acc(label,
+    `<div class="muted" style="padding:10px 18px">no data</div>`);
+  if (k.status === 'warming') {
+    const n = k.count || 0;
+    return acc(label + ' — querying OSV…',
+      `<div class="muted" style="padding:10px 18px">First load: querying the public OSV API for this kernel's CVEs (full kernel CVE history is large — this can take a few minutes). ${n ? 'Found ' + n + ' CVEs so far.' : 'Fetching page 1…'}<br>Refresh the page once the warm-up completes (result is then cached).</div>`);
+  }
+  if (!k.ok) {
+    return acc(label,
+      `<div class="muted" style="padding:10px 18px">${esc(k.reason || 'unavailable')}</div>`);
+  }
+  const c = k.counts || {};
+  const sevSummary = `${c.critical || 0} critical · ${c.high || 0} high · ${c.medium || 0} medium · ${c.low || 0} low${c.negligible ? ' · ' + c.negligible + ' negligible' : ''}`;
+  let body = `<div class="muted" style="padding:10px 18px 4px">${esc(sevSummary)} — ${k.total} unique CVEs across ${esc(k.version)} (source pkg <span style="font-family:var(--cds-font-mono)">${esc(k.package)}</span> on ${esc(k.ecosystem)}, via ${esc(k.source)})${k.status === 'partial' ? ' — <em>partial: page cap reached</em>' : ''}</div>`;
+  const parts = [];
+  for (const [key, tagcls] of [['critical', 'warning'], ['high', 'info']]) {
+    const list = (k.cves && k.cves[key]) || [];
+    if (list.length) parts.push(`<div style="margin:6px 0"><span class="tag ${tagcls}">${key} · ${list.length}</span><pre>${esc(list.join('\\n'))}</pre></div>`);
+  }
+  body += parts.length ? parts.join('') : `<div class="muted" style="padding:6px 18px">No critical or high-severity kernel CVEs.</div>`;
+  body += `<div class="muted" style="padding:0 18px 10px">medium/low/negligible CVEs are summarized above (lists are omitted to keep the payload small). Fetched ${esc(k.fetched_at)}.</div>`;
+  return acc(label + ' — ' + (k.version || '') + ' · ' + sevSummary, body);
+}
+
 function render(d) {
   const g = document.getElementById('grid');
   const panels = [];
@@ -1193,6 +1375,7 @@ function render(d) {
   const sec = d.security;
   const inst = d.instance;
   const cve = d.cve || {ok:false, reason:'no data'};
+  const kernel = d.kernel_cve || {ok:false, reason:'no data'};
   const cf = sec.platform.cloud_foundry, k8s = sec.platform.kubernetes;
   const os = sec.os_stack, ct = sec.container;
   const app = sec.application_layer, br = sec.buildpack_runtime || {};
@@ -1294,12 +1477,15 @@ function render(d) {
     ['Kernel', os.kernel + ' (' + os.arch + ')'],
     ['glibc', os.glibc],
     ['Hardening', h ? h.summary.join(' · ') : null],
-    ['Stemcell', 'node-level fact — not visible from inside the container'],
   ])}</table>`;
   if (ct.cgroups && ct.cgroups.length > 1) {
     stackBody += acc('all cgroups', `<pre>${esc(ct.cgroups.join('\\n'))}</pre>`);
   }
   stackBody += cveBlock('Stack', (cve.components && cve.components.stack) || {}, cve);
+  // Stemcell - CVEs (OSV): the stemcell is a node-level fact we can't see from
+  // inside the container, but its kernel is. Look up Linux kernel CVEs for the
+  // running kernel via the public OSV API (Ubuntu linux source package).
+  stackBody += osvBlock(kernel);
   secPanels.push(card('Stack (root filesystem)', 'ubuntu', os.distribution, 'neutral', stackBody));
 
   // 2.5 Container platform
@@ -1310,11 +1496,7 @@ function render(d) {
   ];
   const k8sRows = [
     ['API server', k8s.api_server.host ? k8s.api_server.host + ':' + k8s.api_server.port : null],
-    ['Namespace', k8s.service_account.namespace || k8s.namespace_env || null],
-    ['Service account', k8s.service_account.name],
     ['SA token', k8s.service_account.token_present ? 'mounted' : (k8s.api_server.host ? 'not mounted (no API access from container)' : null)],
-    ['ca.crt', k8s.service_account.ca_cert_present ? 'present' : null],
-    ['JWT subject', k8s.service_account.jwt_sub],
     ['K8s env vars', Object.keys(k8s.env).length ? Object.entries(k8s.env).map(([k, v]) => k + '=' + v).join('; ') : null],
     ['k8s-app-entrypoint', ct.k8s_entrypoint_config ? 'present' : null],
     ['Org / Space', app.application.organization ? app.application.organization + ' / ' + app.application.space : null],
@@ -1432,8 +1614,10 @@ def main():
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     sys.stderr.write("%s %s listening on %s:%d\n" % (APP_NAME, APP_VERSION, HOST, PORT))
     # Warm the Tanzu Hub CVE cache in the background so the first page load
-    # isn't blocked on the Hub round-trips.
+    # isn't blocked on the Hub round-trips. The OSV kernel-CVE warm runs in
+    # parallel (its own thread, ~5 min of pagination, cached 30 min).
     threading.Thread(target=_hub_warm, daemon=True).start()
+    threading.Thread(target=_osv_warm, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -25,12 +25,17 @@ UI sections, one panel per row:
      Tanzu Hub reports for the buildpack that built this app.
    - *Stack (root filesystem)* — distribution, OS release, CF stack, kernel,
      glibc, container hardening posture (seccomp, NoNewPrivs, capabilities,
-     AppArmor visibility). Stemcell is a node-level fact and is not
-     observable from inside the container — the panel says so. Includes a
-     **CVE row** for the stack's root filesystem.
+     AppArmor visibility). Includes a **CVE row** for the stack's root
+     filesystem and a **`Stemcell - CVEs (OSV)`** row: the stemcell itself is a
+     node-level fact not observable from inside the container, but its *kernel*
+     is — this row looks up Linux kernel CVEs for the running kernel via the
+     public OSV API (Ubuntu `linux` source package, full Debian version from
+     `/proc/version_signature`). The full kernel CVE history is large (~5 min
+     of pagination), so the lookup warms in a background thread and the row
+     shows "querying OSV…" with a running count until it's cached.
    - *Container platform* — Cloud Foundry (app id, uris, build, services,
-     buildpack layers) and/or Kubernetes (API server, service account,
-     namespace, JWT claims, k8s-app-entrypoint config). On CF-on-K8s the
+     buildpack layers) and/or Kubernetes (API server, SA-token presence,
+     k8s-app-entrypoint config). On CF-on-K8s the
      Kubernetes facts lead and the CF overlay is shown in a collapsible. This
      panel also carries a **Container Runtime CVE row** for the platform
      runtime tile this app runs on (per space): `Small Footprint Elastic
@@ -54,9 +59,11 @@ present, muted "Tanzu Hub off" otherwise), and app uptime in human form
 - **Health:** `GET /healthz`
 
 No third-party dependencies; everything is read from `/proc`, `/sys`, `/etc`,
-and the process environment. The only outbound calls are to **Tanzu Hub** for
-CVE enrichment, and only when the `pyi-creds` credhub service is bound (see
-below); with no bound service the CVE rows simply show "unavailable".
+and the process environment. The outbound calls are: to **Tanzu Hub** for
+Buildpack/Stack/Container-Runtime CVE enrichment (only when the `pyi-creds`
+credhub service is bound — see below), and to the **public OSV API**
+(`api.osv.dev`, no auth) for the kernel CVE lookup in the Stack panel. With no
+bound `pyi-creds` service the Tanzu Hub CVE rows simply show "not configured".
 
 ## Tanzu Hub CVE enrichment — fresh deploy
 
@@ -113,6 +120,23 @@ Notes:
 - The platform runtime tile is stamped per space by `deploy.sh`
   (`HUB_RUNTIME_TILE`): cody → `Small Footprint Elastic Application Runtime`,
   cody-older-stemcell → `Resource Segment`, cody-k8s → `N/A`.
+
+## Kernel CVE lookup (OSV) — no setup
+
+The Stack panel's **`Stemcell - CVEs (OSV)`** row looks up Linux kernel CVEs
+for the *running* kernel via the public [OSV API](https://api.osv.dev/) — no
+credentials and no service binding needed. OSV indexes Ubuntu kernels by the
+**source package** `linux` and the **full Debian version** `X.Y.Z-<abi>.<upload>`
+(e.g. `5.15.0-202.212`) under the ecosystem string `Ubuntu:<VERSION_ID>:LTS`.
+The app reads that full version from `/proc/version_signature` (present on all
+modern Ubuntu/Debian kernels); the plain `uname -r` string
+(`5.15.0-202-generic`) is not queryable because it omits the upload number.
+Only the `Ubuntu` severity score is used. The full kernel CVE history is
+large (a jammy 5.15 kernel returned ~2.5k unique CVEs across ~45 pages), so the
+lookup warms in a background thread on startup and is cached for 30 minutes
+(`OSV_CACHE_TTL`); the row shows "querying OSV…" with a running count until it
+completes. Non-Ubuntu stacks show "not applicable". Tunables: `OSV_MAX_PAGES`
+(page cap, default 120), `OSV_PAGE_TIMEOUT`, `OSV_API_URL` (override for tests).
 
 ## Run locally
 
