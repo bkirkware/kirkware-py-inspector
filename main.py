@@ -1024,8 +1024,14 @@ def kernel_cve_info():
 
 
 def _osv_warm():
-    """Background thread: warm the OSV kernel-CVE cache at startup."""
+    """Background thread: warm the OSV kernel-CVE cache at startup.
+
+    Runs AFTER the Hub CVE warm: both warmers parse large JSON payloads, and
+    starting them concurrently pushed a 128M app instance over its limit
+    (exit 137 / OOM). Serializing the two keeps the startup memory peak flat.
+    """
     try:
+        hub_cve_info()   # block until the Hub warm is done (it caches)
         kernel_cve_info()
     except Exception:
         pass

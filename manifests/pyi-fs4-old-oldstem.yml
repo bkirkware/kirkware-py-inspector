@@ -3,7 +3,7 @@
 # Route: pyi-fs4-old-oldstem.apps.tanzu.kirkware.net
 applications:
 - name: pyi-fs4-old-oldstem
-  memory: 128M
+  memory: 256M
   disk_quota: 1G
   instances: 3
   stack: cflinuxfs4
