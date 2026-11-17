@@ -127,16 +127,26 @@ The Stack panel's **`Stemcell - CVEs (OSV)`** row looks up Linux kernel CVEs
 for the *running* kernel via the public [OSV API](https://api.osv.dev/) — no
 credentials and no service binding needed. OSV indexes Ubuntu kernels by the
 **source package** `linux` and the **full Debian version** `X.Y.Z-<abi>.<upload>`
-(e.g. `5.15.0-202.212`) under the ecosystem string `Ubuntu:<VERSION_ID>:LTS`.
-The app reads that full version from `/proc/version_signature` (present on all
+(e.g. `5.15.0-202.212`) under the ecosystem string `Ubuntu:<distro>:LTS`. The
+app reads that full version from `/proc/version_signature` (present on all
 modern Ubuntu/Debian kernels); the plain `uname -r` string
 (`5.15.0-202-generic`) is not queryable because it omits the upload number.
-Only the `Ubuntu` severity score is used. The full kernel CVE history is
-large (a jammy 5.15 kernel returned ~2.5k unique CVEs across ~45 pages), so the
-lookup warms in a background thread on startup and is cached for 30 minutes
-(`OSV_CACHE_TTL`); the row shows "querying OSV…" with a running count until it
-completes. Non-Ubuntu stacks show "not applicable". Tunables: `OSV_MAX_PAGES`
-(page cap, default 120), `OSV_PAGE_TIMEOUT`, `OSV_API_URL` (override for tests).
+Only the `Ubuntu` severity score is used.
+
+**Reading the counts.** OSV's Ubuntu data is tracker-driven: a `UBUNTU-CVE-*`
+record matches every kernel the CVE ever touched (unbounded `introduced 0`
+range), so the raw total (~2.5k for a jammy 5.15 kernel) is *"CVEs tracked
+against this kernel version"*, not open exposure — most were fixed long ago.
+The row therefore leads with a **fix published** section: the (rare) USN
+records with a bounded range, i.e. Ubuntu has a newer-kernel fix out. Only
+critical- and high-severity CVEs are listed; medium/low/negligible are summed
+in the header. The lookup warms in a background thread on startup (serialised
+behind the Hub CVE fetch to keep memory flat), is cached for 30 minutes
+(`OSV_CACHE_TTL`), and trims the huge `versions`/`ranges`/`affected` fields
+during JSON parse so the build peaks well under a 512M instance. The row
+shows "querying OSV…" with a running count until it completes. Non-Ubuntu
+stacks show "not applicable". Tunables: `OSV_MAX_PAGES` (page cap, default
+120), `OSV_PAGE_TIMEOUT`, `OSV_API_URL` (override for tests).
 
 ## Run locally
 

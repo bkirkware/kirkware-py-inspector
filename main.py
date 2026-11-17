@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_NAME = "kirkware-py-inspector"
-APP_VERSION = "1.0.10"
+APP_VERSION = "1.0.11"
 START_TIME = time.time()
 HOST = os.environ.get("BIND", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -934,11 +934,13 @@ def _osv_max_severity(record):
 def _osv_slim(obj):
     """JSON object_hook: drop the fields the kernel CVE lookup never uses.
 
-    OSV kernel records carry huge `affected[].versions` + `ranges` lists
-    (tens of MB per page — the whole kernel CVE universe). The query already
-    filtered by version, so we only need id/severity/upstream/aliases/related.
-    Trimming during parse keeps the build's peak RSS ~flat instead of
-    OOM'ing a small instance (measured 827MB -> 278MB)."""
+    OSV kernel records carry huge `affected[].versions` lists (tens of MB
+    per page — the whole kernel CVE universe) plus `ranges`, `details`,
+    `references`. The query already filtered by version, so we only need
+    id/severity/upstream/aliases/related. Trimming during parse keeps the
+    build's peak RSS ~278MB (measured, vs 827MB raw) instead of OOM'ing a
+    small instance. The fix-published set is resolved in a second, targeted
+    pass over the (rare) USN records — see _osv_build."""
     for k in ("versions", "ranges", "affected", "details", "references"):
         obj.pop(k, None)
     return obj
@@ -954,6 +956,8 @@ def _osv_build():
                               expires=time.time() + OSV_CACHE_TTL)
         return
     found = {}   # cve_id -> max severity rank
+    fixed = set()  # cve_ids with a published fix version (bounded range)
+    usn_ids = []  # USN record ids seen (only these carry fix versions)
     pages = 0
     token = None
     try:
@@ -971,9 +975,12 @@ def _osv_build():
                            object_hook=_osv_slim)
             for v in r.get("vulns") or []:
                 rank = _osv_max_severity(v)
+                rid = v.get("id") or ""
+                if rid.startswith("USN-"):
+                    usn_ids.append(rid)
                 # USN / UBUNTU-CVE records carry the CVE ids in `id` or
                 # `upstream` (and sometimes `aliases`/`related`); collect all.
-                ids = {v.get("id")} | set(v.get("upstream") or []) \
+                ids = {rid} | set(v.get("upstream") or []) \
                     | set(v.get("aliases") or []) | set(v.get("related") or [])
                 for i in ids:
                     for c in re.findall(r"CVE-\d{4}-\d+", str(i or "")):
@@ -985,6 +992,36 @@ def _osv_build():
                 break
             with _osv_lock:
                 _osv_state["count"] = len(found)
+
+        # Second pass: the UBUNTU-CVE tracker records are unbounded
+        # (introduced 0 — they match every kernel the CVE ever touched),
+        # so only USN records say a fix version is out. They're rare (a few
+        # per kernel), so fetch each doc directly — it's small, and the
+        # bounded-range fact is what turns "tracked" into "fix available".
+        for rid in dict.fromkeys(usn_ids):  # dedupe, keep order
+            try:
+                url = OSV_API_URL.rsplit("/query", 1)[0] + "/vulns/" + rid
+                doc = json.loads(urllib.request.urlopen(
+                    urllib.request.Request(url), timeout=OSV_PAGE_TIMEOUT).read())
+            except Exception:
+                continue
+            for a in doc.get("affected") or []:
+                p = a.get("package") or {}
+                if p.get("name") != q["name"]:
+                    continue
+                bounded = any(
+                    (e.get("fixed") or e.get("less_than") or e.get("last_affected"))
+                    for rg in (a.get("ranges") or [])
+                    for e in (rg.get("events") or []))
+                if not bounded:
+                    continue
+                for i in ([doc.get("id")] + list(doc.get("aliases") or [])
+                          + list(doc.get("upstream") or [])
+                          + list(doc.get("related") or [])):
+                    for c in re.findall(r"CVE-\d{4}-\d+", str(i or "")):
+                        if c in found:
+                            fixed.add(c)
+            # /v1/vulns docs are small; no trim needed for memory.
     except Exception as e:
         with _osv_lock:
             _osv_state.update(value={"ok": False, "reason": str(e),
@@ -994,10 +1031,15 @@ def _osv_build():
         return
     sev_rank = {_OS_SEVERITY_RANK[k]: k for k in _OS_SEVERITY_RANK}
     buckets = {k: [] for k in _OS_SEVERITY_RANK}
+    fixed_buckets = {k: [] for k in ("critical", "high")}
     for c, rank in found.items():
         buckets[sev_rank.get(rank, "unknown")].append(c)
+        if c in fixed and rank >= _OS_SEVERITY_RANK["high"]:
+            fixed_buckets[sev_rank.get(rank, "high")].append(c)
     for k in buckets:
         buckets[k].sort()
+    for k in fixed_buckets:
+        fixed_buckets[k].sort()
     value = {
         "ok": True,
         "status": "ok" if not token else "partial",
@@ -1008,8 +1050,15 @@ def _osv_build():
         "pages": pages,
         "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "total": len(found),
+        "fix_published": len(fixed),
         "counts": {k: len(buckets[k]) for k in
                    ("critical", "high", "medium", "low", "negligible")},
+        # OSV's Ubuntu data is tracker-driven: a UBUNTU-CVE record matches
+        # every kernel it ever affected (introduced-0, no upper bound), so
+        # `total` is "tracked against this version", not "open exposure".
+        # The fix-published set (bounded range) is the real "upgrade to a
+        # newer kernel fixes this" list — surfaced first in the UI.
+        "fix_cves": fixed_buckets,
         "cves": {k: buckets[k] for k in ("critical", "high")},
     }
     with _osv_lock:
@@ -1392,15 +1441,24 @@ function osvBlock(k) {
   }
   const c = k.counts || {};
   const sevSummary = `${c.critical || 0} critical · ${c.high || 0} high · ${c.medium || 0} medium · ${c.low || 0} low${c.negligible ? ' · ' + c.negligible + ' negligible' : ''}`;
-  let body = `<div class="muted" style="padding:10px 18px 4px">${esc(sevSummary)} — ${k.total} unique CVEs across ${esc(k.version)} (source pkg <span style="font-family:var(--cds-font-mono)">${esc(k.package)}</span> on ${esc(k.ecosystem)}, via ${esc(k.source)})${k.status === 'partial' ? ' — <em>partial: page cap reached</em>' : ''}</div>`;
+  let body = `<div class="muted" style="padding:10px 18px 4px">${esc(sevSummary)} — ${k.total} CVEs tracked against ${esc(k.version)} (source pkg <span style="font-family:var(--cds-font-mono)">${esc(k.package)}</span> on ${esc(k.ecosystem)}, via ${esc(k.source)})${k.status === 'partial' ? ' — <em>partial: page cap reached</em>' : ''}</div>`;
+  body += `<div class="muted" style="padding:0 18px 8px">OSV's Ubuntu data is tracker-driven: it matches a CVE to every kernel it ever affected, most of which are already patched in this kernel. The <strong>fix published</strong> section below lists the CVEs with a newer-kernel fix out — the real upgrade candidates (critical &amp; high; ${k.fix_published != null ? k.fix_published : 0} have fixes in total). The tracked list is context, not open exposure.</div>`;
   const parts = [];
+  const fx = k.fix_cves || {};
   for (const [key, tagcls] of [['critical', 'warning'], ['high', 'info']]) {
-    const list = (k.cves && k.cves[key]) || [];
-    if (list.length) parts.push(`<div style="margin:6px 0"><span class="tag ${tagcls}">${key} · ${list.length}</span><pre>${esc(list.join('\\n'))}</pre></div>`);
+    const list = fx[key] || [];
+    if (list.length) parts.push(`<div style="margin:6px 0"><span class="tag success">fix published · ${key} · ${list.length}</span><pre>${esc(list.join('\\n'))}</pre></div>`);
   }
-  body += parts.length ? parts.join('') : `<div class="muted" style="padding:6px 18px">No critical or high-severity kernel CVEs.</div>`;
-  body += `<div class="muted" style="padding:0 18px 10px">medium/low/negligible CVEs are summarized above (lists are omitted to keep the payload small). Fetched ${esc(k.fetched_at)}.</div>`;
-  return acc(label + ' — ' + (k.version || '') + ' · ' + sevSummary, body);
+  if (parts.length) body += parts.join('') + `<div class="muted" style="padding:6px 18px 2px">All other tracked CVEs (fix status unknown or already patched in this kernel) — critical &amp; high only, lists collapsed for medium/low/negligible:</div>`;
+  const parts2 = [];
+  for (const [key, tagcls] of [['critical', 'warning'], ['high', 'info']]) {
+    const list = ((k.cves || {})[key]) || [];
+    if (list.length) parts2.push(`<div style="margin:6px 0"><span class="tag ${tagcls}">tracked · ${key} · ${list.length}</span><pre>${esc(list.join('\\n'))}</pre></div>`);
+  }
+  body += parts2.length ? parts2.join('') : `<div class="muted" style="padding:6px 18px">No tracked critical or high-severity kernel CVEs.</div>`;
+  body += `<div class="muted" style="padding:0 18px 10px">Fetched ${esc(k.fetched_at)}.</div>`;
+  const fxShown = (fx.critical || []).length + (fx.high || []).length;
+  return acc(label + ' — ' + (k.version || '') + ' · ' + sevSummary + ' · ' + fxShown + ' fix(es) out', body);
 }
 
 function render(d) {
