@@ -10,6 +10,9 @@ applications:
   buildpacks:
     - python_buildpack
   command: python3 main.py
+  # Tanzu Hub credentials for CVE enrichment (bound on push).
+  services:
+    - pyi-creds
   routes:
     - route: pyi-fs1-oldstem.apps.tanzu.kirkware.net
   # Where this app is stored. CF droplets drop .git, so the app reads these
@@ -20,3 +23,4 @@ applications:
     BUILDPACK_NAME: ""
     BUILDPACK_VERSION: ""
     APP_STACK: ""
+    HUB_RUNTIME_TILE: ""

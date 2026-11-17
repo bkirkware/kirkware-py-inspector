@@ -22,12 +22,15 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
+import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_NAME = "kirkware-py-inspector"
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 START_TIME = time.time()
 HOST = os.environ.get("BIND", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -568,6 +571,286 @@ def platform_info():
     return {"cloud_foundry": cf, "kubernetes": k8s}
 
 
+# ------------------------------------------------- Tanzu Hub CVE enrichment
+#
+# Credentials come from a bound credhub service instance (label "credhub")
+# named `pyi-creds` (see the manifests' `services:` + README). Hub uses an
+# OAuth2 client_credentials grant for auth and a single GraphQL endpoint for
+# data. We identify *this* app in Hub by its CF app name, read the foundation
+# its VRN carries, and pull component vulnerabilities for that foundation —
+# the buildpack, the stack, and the platform runtime tile this app runs on.
+
+HUB_CACHE_TTL = int(os.environ.get("HUB_CACHE_TTL", "300"))  # 5 min
+HUB_PAGE_SIZE = 100
+
+# Platform runtime tile, per container runtime. Kubernetes is not modeled in
+# the TAS Hub vulnerability catalog yet (future work) -> "N/A".
+HUB_RUNTIME_TILE = os.environ.get("HUB_RUNTIME_TILE", "")
+
+# GraphQL: look this app up by name -> its VRN (which names its foundation).
+_GQL_APP = """
+query($first: Int, $names: [String!]) {
+  entityQuery {
+    queryEntities(entityName: $names, first: $first) {
+      edges { node { entityName entityId } }
+    }
+  }
+}
+"""
+
+# GraphQL: component vulnerabilities for one EDS type, scoped to a foundation,
+# with the per-severity CVE lists. `entityName` is a prefix filter upstream, so
+# we match exact name + version client-side below.
+_GQL_COMP = """
+query($f: ComponentFilterInput, $after: String, $first: Int) {
+  vulnerabilityQuery {
+    queryComponentVulnerabilities(componentFilter: $f, first: $first, after: $after) {
+      edges { node {
+        entityName currentVersion entityEdsType foundationName
+        criticalCveCount highCveCount latestPatchVersion
+        criticalCveList { cveId }
+        highCveList { cveId }
+      } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+"""
+
+_hub_lock = threading.Lock()
+_hub_token = {"value": None, "expires": 0.0}
+_hub_cache = {"value": None, "expires": 0.0}
+
+
+def _hub_creds():
+    """Tanzu Hub credentials from the bound `pyi-creds` credhub service."""
+    raw = os.environ.get("VCAP_SERVICES")
+    if not raw:
+        return None
+    try:
+        for entries in json.loads(raw).values():
+            for e in entries:
+                if e.get("label") == "credhub":
+                    c = e.get("credentials", {})
+                    if c.get("TANZU_HUB_URL") and c.get("TANZU_HUB_SERVICE_ACCOUNT_ID"):
+                        return c
+    except Exception:
+        pass
+    return None
+
+
+def _hub_token_locked(creds):
+    base = creds["TANZU_HUB_URL"].rstrip("/")
+    now = time.time()
+    if _hub_token["value"] and now < _hub_token["expires"] - 60:
+        return _hub_token["value"]
+    body = urllib.parse.urlencode({
+        "grant_type": "client_credentials",
+        "client_id": creds["TANZU_HUB_SERVICE_ACCOUNT_ID"],
+        "client_secret": creds["TANZU_HUB_SERVICE_ACCOUNT_SECRET"],
+    }).encode()
+    req = urllib.request.Request(
+        base + "/auth/z/default/oauth/token", data=body, method="POST",
+        headers={"content-type": "application/x-www-form-urlencoded"})
+    r = urllib.request.urlopen(req, timeout=30)
+    data = json.loads(r.read())
+    _hub_token["value"] = data["access_token"]
+    _hub_token["expires"] = now + int(data.get("expires_in", 1800))
+    return _hub_token["value"]
+
+
+def _hub_gql(base, token, query, variables=None, timeout=30):
+    """POST a GraphQL query to the Hub's /hub/graphql endpoint. `base` is the
+    Hub origin (https://hub...); an optional HUB_URL_OVERRIDE replaces it (tests)."""
+    root = os.environ.get("HUB_URL_OVERRIDE") or base
+    req = urllib.request.Request(
+        root.rstrip("/") + "/hub/graphql",
+        data=json.dumps({"query": query, "variables": variables or {}}).encode(),
+        method="POST",
+        headers={"content-type": "application/json", "authorization": "Bearer " + token})
+    r = urllib.request.urlopen(req, timeout=timeout)
+    return json.loads(r.read())
+
+
+def _hub_component_cves(creds, base, token, foundation_id, eds_types, name_filter):
+    """All component-vulnerability rows for the given EDS types + foundation,
+    deduped by (name, version) and kept only when `name_filter(name, version)`
+    is true. Handles cursor pagination up to a bounded page count."""
+    filt = {"entityEdsType": eds_types, "foundationId": [foundation_id]}
+    nodes, after, pages = [], None, 0
+    while pages < 10:
+        pages += 1
+        r = _hub_gql(base, token, _GQL_COMP, {"f": filt, "after": after, "first": HUB_PAGE_SIZE})
+        if "errors" in r:
+            raise RuntimeError(r["errors"][0].get("message", "graphql error"))
+        p = r["data"]["vulnerabilityQuery"]["queryComponentVulnerabilities"]
+        nodes.extend(n["node"] for n in p["edges"])
+        if not p["pageInfo"]["hasNextPage"]:
+            break
+        after = p["pageInfo"]["endCursor"]
+    out, seen = [], set()
+    for n in nodes:
+        key = (n["entityName"], n["currentVersion"])
+        if key in seen:
+            continue
+        seen.add(key)
+        if name_filter and not name_filter(n["entityName"], n["currentVersion"]):
+            continue
+        out.append(n)
+    return out
+
+
+def _cve_ids(row, severity):
+    return [c.get("cveId") for c in (row.get(severity) or []) if c.get("cveId")]
+
+
+def _hub_build_cves(creds):
+    """Build the CVE payload for the buildpack / stack / runtime tile."""
+    app = {}
+    raw = os.environ.get("VCAP_APPLICATION")
+    if raw:
+        try:
+            app = json.loads(raw)
+        except Exception:
+            app = {}
+    app_name = app.get("application_name") or APP_NAME
+    stack = os.environ.get("APP_STACK") or _read("/etc/cf-stack")
+    buildpack_name = os.environ.get("BUILDPACK_NAME")
+    buildpack_version = os.environ.get("BUILDPACK_VERSION")
+    base = creds["TANZU_HUB_URL"].rstrip("/")
+
+    with _hub_lock:
+        token = _hub_token_locked(creds)
+
+        # 1) look *this* app up by name -> VRN -> foundation instance id
+        r = _hub_gql(base, token, _GQL_APP, {"first": 10, "names": [app_name]})
+        edges = (r.get("data", {}).get("entityQuery", {})
+                 .get("queryEntities", {}).get("edges", []))
+        vrn = None
+        for e in edges:
+            if e["node"]["entityName"] == app_name:
+                vrn = e["node"]["entityId"]
+                break
+        if vrn is None and edges:
+            vrn = edges[0]["node"]["entityId"]
+        if not vrn or "instance:" not in vrn:
+            return {"ok": False, "reason": "app not found in Hub",
+                    "app_name": app_name, "components": {}}
+        instance = vrn.split("instance:")[1].split("/")[0]
+        foundation_id = "vrn/provider:TAS/instance:%s/Foundation:%s" % (instance, instance)
+
+        # 2) buildpack CVEs for the buildpack that built this app
+        buildpack = {"ok": True, "name": buildpack_name, "version": buildpack_version,
+                     "matched": None}
+        if buildpack_name:
+            try:
+                rows = _hub_component_cves(creds, base, token, foundation_id,
+                                           ["Tanzu.TAS.Buildpack"],
+                                           lambda n, v: n == buildpack_name)
+                if rows:
+                    rows.sort(key=lambda n: 0 if n["currentVersion"] == buildpack_version else 1)
+                    buildpack["matched"] = _cve_row_summary(rows[0])
+                else:
+                    buildpack["ok"] = True
+            except Exception as e:
+                buildpack = {"ok": False, "name": buildpack_name, "reason": str(e)}
+
+        # 3) stack CVEs
+        stack_row = {"ok": True, "name": stack, "version": None, "matched": None}
+        if stack:
+            try:
+                rows = _hub_component_cves(creds, base, token, foundation_id,
+                                           ["Tanzu.TAS.Stack"],
+                                           lambda n, v: n == stack)
+                if rows:
+                    stack_row["matched"] = _cve_row_summary(rows[0])
+            except Exception as e:
+                stack_row = {"ok": False, "name": stack, "reason": str(e)}
+
+        # 4) platform runtime tile CVEs
+        runtime = {"ok": True, "name": HUB_RUNTIME_TILE or None, "matched": None}
+        if HUB_RUNTIME_TILE == "N/A" or not HUB_RUNTIME_TILE:
+            runtime = {"ok": True, "name": HUB_RUNTIME_TILE or "not set",
+                       "matched": None, "na": True}
+        else:
+            try:
+                rows = _hub_component_cves(creds, base, token, foundation_id,
+                                           ["Tanzu.TAS.Tile"],
+                                           lambda n, v: n == HUB_RUNTIME_TILE)
+                if rows:
+                    runtime["matched"] = _cve_row_summary(rows[0])
+            except Exception as e:
+                runtime = {"ok": False, "name": HUB_RUNTIME_TILE, "reason": str(e)}
+
+        return {
+            "ok": True,
+            "app_name": app_name,
+            "app_vrn": vrn,
+            "foundation_instance": instance,
+            "foundation_id": foundation_id,
+            "hub_url": base,
+            "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "components": {
+                "buildpack": buildpack,
+                "stack": stack_row,
+                "runtime": runtime,
+            },
+        }
+
+
+def _cve_row_summary(row):
+    """Shape one component-vulnerability row into the UI payload.
+
+    Hub exposes CVE *lists* only for critical + high severity (moderate/low
+    exist as counts on the raw engine fields, not as per-CVE lists)."""
+    return {
+        "name": row["entityName"],
+        "version": row["currentVersion"],
+        "latest_patch_version": row.get("latestPatchVersion"),
+        "foundation": row.get("foundationName"),
+        "counts": {
+            "critical": row.get("criticalCveCount", 0),
+            "high": row.get("highCveCount", 0),
+        },
+        "cves": {
+            "critical": _cve_ids(row, "criticalCveList"),
+            "high": _cve_ids(row, "highCveList"),
+        },
+    }
+
+
+def hub_cve_info():
+    """Tanzu Hub CVE enrichment, cached for HUB_CACHE_TTL seconds.
+
+    Never raises: any failure (no creds, network, GraphQL) returns a
+    structured {ok: false, reason} so the UI can show why.
+    """
+    now = time.time()
+    with _hub_lock:
+        if _hub_cache["value"] and now < _hub_cache["expires"]:
+            return _hub_cache["value"]
+    creds = _hub_creds()
+    if not creds:
+        return {"ok": False, "reason": "no pyi-creds (credhub) service bound"}
+    try:
+        result = _hub_build_cves(creds)
+    except Exception as e:
+        result = {"ok": False, "reason": str(e)}
+    with _hub_lock:
+        _hub_cache["value"] = result
+        _hub_cache["expires"] = now + HUB_CACHE_TTL
+    return result
+
+
+def _hub_warm():
+    """Background thread: warm the CVE cache at startup so the first UI load
+    doesn't pay the Hub round-trips."""
+    try:
+        hub_cve_info()
+    except Exception:
+        pass
+
+
 # -------------------------------------------------------------- env + misc
 
 SECRET_RE = re.compile(r"(TOKEN|SECRET|PASSW|CRED|KEY|AUTH|PRIVATE)", re.I)
@@ -643,6 +926,7 @@ def collect_info():
         },
         "network": network_info(),
         "environment_variables": env_info(),
+        "cve": hub_cve_info(),
         "versions": {
             "python": platform.python_version(),
             "cf_cli": _sh(["cf", "--version"]),
@@ -824,7 +1108,7 @@ PAGE = """<!doctype html>
   <nav class="crumbs"><a href="#">Home</a><span> / </span><span class="here">Runtime Inspector</span></nav>
   <div class="stack" id="grid"><div class="muted" style="padding:24px">Loading infrastructure data…</div></div>
 </main>
-<footer>collected live from the process environment · no external calls · secrets masked · design: VMware Clarity (light)</footer>
+<footer>collected live from the process environment · CVEs from Tanzu Hub · secrets masked · design: VMware Clarity (light)</footer>
 <script>
 let DATA = null;
 const esc = s => String(s ?? "—").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -853,6 +1137,34 @@ function card(title, icon, tagText, tagCls, body) {
 function acc(label, inner) {
   return `<div class="acc"><button class="acc-hd" type="button" onclick="this.parentElement.classList.toggle('open')"><span class="acc-caret">▸</span>${esc(label)}</button><div class="acc-bd">${inner}</div></div>`;
 }
+// Tanzu Hub CVE accordion. `comp` = {ok, name, matched:{name,version,counts,cves,latest_patch_version}, na}.
+// `cve` = top-level hub result; when !cve.ok we surface the reason.
+function cveBlock(label, comp, cve, naMsg) {
+  if (!cve || !cve.ok) {
+    return acc(label + ' — CVEs (Tanzu Hub)',
+      `<div class="muted" style="padding:10px 18px">unavailable — ${esc((cve && cve.reason) || 'no pyi-creds credhub service bound')}</div>`);
+  }
+  comp = comp || {};
+  const m = comp.matched;
+  let header = label + ' — CVEs (Tanzu Hub)';
+  if (comp.na) header += ' — N/A';
+  else if (m) header += ' — ' + m.name + ' ' + (m.version || '') + ' · ' + m.counts.critical + ' critical · ' + m.counts.high + ' high';
+  let body;
+  if (comp.na) {
+    body = `<div class="muted" style="padding:10px 18px">${esc(naMsg || 'Not applicable for this runtime.')}</div>`;
+  } else if (!m) {
+    body = `<div class="muted" style="padding:10px 18px">No CVEs reported for ${esc(comp.name || 'this component')} in Tanzu Hub.</div>`;
+  } else {
+    const parts = [];
+    for (const [key, tagcls] of [['critical','warning'],['high','info']]) {
+      const list = (m.cves && m.cves[key]) || [];
+      if (list.length) parts.push(`<div style="margin:6px 0"><span class="tag ${tagcls}">${key} · ${list.length}</span><pre>${esc(list.join('\\n'))}</pre></div>`);
+    }
+    body = parts.length ? parts.join('') : `<div class="muted" style="padding:10px 18px">No open CVEs.</div>`;
+    if (m.latest_patch_version) body += `<div class="muted" style="padding:0 18px">latest patch version: <span style="font-family:var(--cds-font-mono)">${esc(m.latest_patch_version)}</span></div>`;
+  }
+  return acc(header, body);
+}
 
 function render(d) {
   const g = document.getElementById('grid');
@@ -865,6 +1177,7 @@ function render(d) {
 
   const sec = d.security;
   const inst = d.instance;
+  const cve = d.cve || {ok:false, reason:'no data'};
   const cf = sec.platform.cloud_foundry, k8s = sec.platform.kubernetes;
   const os = sec.os_stack, ct = sec.container;
   const app = sec.application_layer, br = sec.buildpack_runtime || {};
@@ -942,6 +1255,7 @@ function render(d) {
       acc('buildpack layer ' + l.layer + ' — ' + l.tools.length + ' tools',
         `<pre>${esc(l.tools.join('\\n') || 'no bin/ tools')}</pre>`)).join('');
   }
+  bpBody += cveBlock('Buildpack', (cve.components && cve.components.buildpack) || {}, cve);
   secPanels.push(card('Buildpack (runtime)', 'python', 'python_buildpack', 'neutral', bpBody));
 
   // 2.4 Stack (root filesystem)
@@ -958,6 +1272,7 @@ function render(d) {
   if (ct.cgroups && ct.cgroups.length > 1) {
     stackBody += acc('all cgroups', `<pre>${esc(ct.cgroups.join('\\n'))}</pre>`);
   }
+  stackBody += cveBlock('Stack', (cve.components && cve.components.stack) || {}, cve);
   secPanels.push(card('Stack (root filesystem)', 'ubuntu', os.distribution, 'neutral', stackBody));
 
   // 2.5 Container platform
@@ -1007,6 +1322,13 @@ function render(d) {
     platCls = 'info';
   }
   secPanels.push(card('Container platform', k8s.detected ? 'k8s' : 'cf', platTag, platCls, platBody));
+
+  // 2.6 Container Runtime (platform runtime tile CVEs from Tanzu Hub)
+  const rtComp = (cve.components && cve.components.runtime) || {};
+  const rtName = rtComp.name || (k8s.detected ? 'Kubernetes' : 'Cloud Foundry');
+  secPanels.push(card('Container Runtime', k8s.detected ? 'k8s' : 'cf', rtName, 'neutral',
+    cveBlock('Container Runtime', rtComp, cve,
+      'Platform runtime CVEs are not tracked for Kubernetes in Tanzu Hub yet.')));
 
   panels.push(`<div class="sec-group"><h2>${ICONS.shield}Security</h2><div class="stack">${secPanels.join('')}</div></div>`);
 
@@ -1085,6 +1407,9 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     sys.stderr.write("%s %s listening on %s:%d\n" % (APP_NAME, APP_VERSION, HOST, PORT))
+    # Warm the Tanzu Hub CVE cache in the background so the first page load
+    # isn't blocked on the Hub round-trips.
+    threading.Thread(target=_hub_warm, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

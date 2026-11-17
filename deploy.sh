@@ -35,17 +35,26 @@ if [ -n "$BUILDPACK" ]; then
 fi
 
 APPNAME="$(basename "$MANIFEST" .yml)"
+# Platform runtime tile for CVE lookup (per container runtime / space).
+# Kubernetes (VKS) is not modeled in the TAS Hub vuln catalog yet -> "N/A".
+case "$SPACE" in
+  cody-k8s)            HUB_RUNTIME_TILE="N/A" ;;
+  cody-older-stemcell) HUB_RUNTIME_TILE="Resource Segment" ;;
+  *)                   HUB_RUNTIME_TILE="Small Footprint Elastic Application Runtime" ;;
+esac
 GEN="$(dirname "$0")/.gen-$APPNAME.yml"
 awk -v origin="$ORIGIN" -v commit="$COMMIT" \
-    -v stack="$STACK" -v bpname="$BUILDPACK" -v bpver="$BUILDPACK_VERSION" '
+    -v stack="$STACK" -v bpname="$BUILDPACK" -v bpver="$BUILDPACK_VERSION" \
+    -v hubtile="$HUB_RUNTIME_TILE" '
   /^    GIT_REPO_URL:/       { print "    GIT_REPO_URL: \"" origin "\""; next }
-  /^    GIT_COMMIT:/         { print "    GIT_COMMIT: \"" commit "\""; next }
-  /^    BUILDPACK_NAME:/     { print "    BUILDPACK_NAME: \"" bpname "\""; next }
-  /^    BUILDPACK_VERSION:/  { print "    BUILDPACK_VERSION: \"" bpver "\""; next }
-  /^    APP_STACK:/          { print "    APP_STACK: \"" stack "\""; next }
+  /^    GIT_COMMIT:/          { print "    GIT_COMMIT: \"" commit "\""; next }
+  /^    BUILDPACK_NAME:/      { print "    BUILDPACK_NAME: \"" bpname "\""; next }
+  /^    BUILDPACK_VERSION:/   { print "    BUILDPACK_VERSION: \"" bpver "\""; next }
+  /^    APP_STACK:/           { print "    APP_STACK: \"" stack "\""; next }
+  /^    HUB_RUNTIME_TILE:/    { print "    HUB_RUNTIME_TILE: \"" hubtile "\""; next }
   { print }
 ' "$MANIFEST" > "$GEN"
 
-echo "stamping: stack=$STACK buildpack=$BUILDPACK v$BUILDPACK_VERSION commit=$COMMIT"
+echo "stamping: stack=$STACK buildpack=$BUILDPACK v$BUILDPACK_VERSION tile=$HUB_RUNTIME_TILE commit=$COMMIT"
 cf push "$APPNAME" -f "$GEN"
 rm -f "$GEN"
