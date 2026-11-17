@@ -136,17 +136,16 @@ Only the `Ubuntu` severity score is used.
 **Reading the counts.** OSV's Ubuntu data is tracker-driven: a `UBUNTU-CVE-*`
 record matches every kernel the CVE ever touched (unbounded `introduced 0`
 range), so the raw total (~2.5k for a jammy 5.15 kernel) is *"CVEs tracked
-against this kernel version"*, not open exposure — most were fixed long ago.
-The row therefore leads with a **fix published** section: the (rare) USN
-records with a bounded range, i.e. Ubuntu has a newer-kernel fix out. Only
-critical- and high-severity CVEs are listed; medium/low/negligible are summed
-in the header. The lookup warms in a background thread on startup (serialised
-behind the Hub CVE fetch to keep memory flat), is cached for 30 minutes
-(`OSV_CACHE_TTL`), and trims the huge `versions`/`ranges`/`affected` fields
-during JSON parse so the build peaks well under a 512M instance. The row
-shows "querying OSV…" with a running count until it completes. Non-Ubuntu
-stacks show "not applicable". Tunables: `OSV_MAX_PAGES` (page cap, default
-120), `OSV_PAGE_TIMEOUT`, `OSV_API_URL` (override for tests).
+against this kernel version"*, not open exposure. To keep the row simple the
+app lists only **critical- and high-severity** CVE IDs — medium, low and
+negligible are counted during the lookup but not shown. The lookup warms in a
+background thread on startup (serialised behind the Hub CVE fetch to keep
+memory flat), is cached for 30 minutes (`OSV_CACHE_TTL`), and trims the huge
+`versions`/`ranges`/`affected` fields during JSON parse so the build peaks
+well under a 512M instance. The row shows "querying OSV…" with a running count
+until it completes. Non-Ubuntu stacks show "not applicable". Tunables:
+`OSV_MAX_PAGES` (page cap, default 120), `OSV_PAGE_TIMEOUT`, `OSV_API_URL`
+(override for tests).
 
 ## Run locally
 
