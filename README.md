@@ -1,130 +1,161 @@
-# kirkware-py-inspector
+# py-inspector
 
-Infrastructure inspector: a small stdlib-only Python web app that reports
-everything it can observe about the environment it runs in — built to run on
-**both Cloud Foundry (python_buildpack) and Kubernetes** (including
-CF-on-K8s / VKS, where both are detected and Kubernetes is labeled first).
+A small **stdlib-only** Python web app that reports everything it can observe
+about the environment it runs in. Built to run on **both Cloud Foundry
+(python_buildpack) and Kubernetes** — including CF-on-K8s / VKS, where both are
+detected and Kubernetes is labeled first. No third-party dependencies;
+everything is read from `/proc`, `/sys`, `/etc`, and the process environment.
+
+- **UI:** `GET /` — a dark "Runtime Inspector" dashboard
+- **API:** `GET /api/info` — the full report as JSON
+- **Health:** `GET /healthz`
+
+There are two optional outbound data sources, both degrade gracefully when
+unavailable:
+
+| Source | What it adds | Setup |
+|---|---|---|
+| **Tanzu Hub** | Buildpack / Stack / Container-Runtime CVE rows | a bound `credhub` service (see [Tanzu Hub CVE enrichment](#tanzu-hub-cve-enrichment)) |
+| **OSV** (`api.osv.dev`) | Kernel CVE lookup for the running kernel | none — public API, no auth |
+
+With neither configured the app still reports everything local; the CVE rows
+simply read "not configured".
 
 ## What it reports
 
 UI sections, one panel per row:
 
-1. **Container Instance** — the instance number as a large hero display,
-   plus instance GUID, hostname, internal/external IP, started-at +
-   human-friendly uptime, PID 1, cgroup.
+1. **Container Instance** — the instance number as a large hero display, plus
+   instance GUID, hostname, internal/external IP, started-at + human-friendly
+   uptime, PID 1, cgroup.
 2. **Security** — a group of sub-panels:
-   - *Application Layer* — app name/version, app id, routes, org/space,
-     CF API, process type, build ID, git repository origin + commit;
-     **Environment Variables folded in as a collapsible pull-down**
-     (secrets masked).
+   - *Application Layer* — app name/version, app id, routes, org/space, CF API,
+     process type, build id, git repository origin + commit; **Environment
+     Variables folded in as a collapsible pull-down** (secrets masked).
    - *Application Dependencies* — every package in the app's environment
      (direct vs transitive, with the requirement edges that pulled each in).
    - *Buildpack (runtime)* — Python runtime (version, implementation,
-     executable, build string), pip/setuptools, buildpack dependency layers
-     and the tools each provides, plus a **CVE row** listing the CVEs
-     Tanzu Hub reports for the buildpack that built this app.
+     executable, build string), pip/setuptools, buildpack dependency layers and
+     the tools each provides, plus a **CVE row** for the buildpack that built
+     this app (from Tanzu Hub, when configured).
    - *Stack (root filesystem)* — distribution, OS release, CF stack, kernel,
      glibc, container hardening posture (seccomp, NoNewPrivs, capabilities,
      AppArmor visibility). Includes a **CVE row** for the stack's root
-     filesystem and a **`Stemcell - CVEs (OSV)`** row: the stemcell itself is a
-     node-level fact not observable from inside the container, but its *kernel*
-     is — this row looks up Linux kernel CVEs for the running kernel via the
-     public OSV API (Ubuntu `linux` source package, full Debian version from
-     `/proc/version_signature`). The full kernel CVE history is large (~5 min
-     of pagination), so the lookup warms in a background thread and the row
-     shows "querying OSV…" with a running count until it's cached.
+     filesystem (from Tanzu Hub) and a **`Stemcell - CVEs (OSV)`** row — the
+     stemcell itself is a node-level fact not observable from inside the
+     container, but its *kernel* is, so this row looks up Linux kernel CVEs for
+     the running kernel via the public [OSV API](https://api.osv.dev/) (see
+     [Kernel CVE lookup](#kernel-cve-lookup-osv-no-setup)).
    - *Container platform* — Cloud Foundry (app id, uris, build, services,
      buildpack layers) and/or Kubernetes (API server, SA-token presence,
-     k8s-app-entrypoint config). On CF-on-K8s the
-     Kubernetes facts lead and the CF overlay is shown in a collapsible. This
-     panel also carries a **Container Runtime CVE row** for the platform
-     runtime tile this app runs on (per space): `Small Footprint Elastic
-     Application Runtime` (cody), `Resource Segment` (cody-older-stemcell), or
-     `N/A` (cody-k8s — Kubernetes runtime is not in the TAS Hub catalog yet).
+     k8s-app-entrypoint config). On CF-on-K8s the Kubernetes facts lead and the
+     CF overlay is shown in a collapsible. This panel also carries a
+     **Container Runtime CVE row** for the platform runtime tile you name via
+     the `HUB_RUNTIME_TILE` env var (see [Configuration](#configuration)).
 3. **Networking** — hostname + resolution, default route, DNS, listening
    sockets, per-interface detail (MAC/MTU/state/addresses), routes.
 4. **Infrastructure** — node-level resources: CPU (count × model), memory
    (total/available), disk usage per mount.
 
-The header shows the detected container platform (Kubernetes wins over
-Cloud Foundry when both are present) with the official brand icon
-(Kubernetes and Cloud Foundry marks are the Simple Icons CC0 paths in their
-official colors), a **Tanzu Hub detection badge** (green "Tanzu Hub" when the
-`pyi-creds` credhub binding with the Hub service-account credentials is
-present, muted "Tanzu Hub off" otherwise), and app uptime in human form
-(e.g. `2d 3h 14m`).
+The header shows the detected container platform (Kubernetes wins over Cloud
+Foundry when both are present) with the official brand icon (Kubernetes and
+Cloud Foundry marks are the Simple Icons CC0 paths in their official colors), a
+**Tanzu Hub detection badge** (green "Tanzu Hub" when a credhub binding with
+Hub credentials is present, muted "Tanzu Hub off" otherwise), and app uptime in
+human form (e.g. `2d 3h 14m`).
 
-- **UI:** `GET /` — dark dashboard, "Runtime Inspector"
-- **API:** `GET /api/info` — full JSON
-- **Health:** `GET /healthz`
+## Run locally
 
-No third-party dependencies; everything is read from `/proc`, `/sys`, `/etc`,
-and the process environment. The outbound calls are: to **Tanzu Hub** for
-Buildpack/Stack/Container-Runtime CVE enrichment (only when the `pyi-creds`
-credhub service is bound — see below), and to the **public OSV API**
-(`api.osv.dev`, no auth) for the kernel CVE lookup in the Stack panel. With no
-bound `pyi-creds` service the Tanzu Hub CVE rows simply show "not configured".
+```sh
+python3 main.py          # honors $PORT (default 8080) and $BIND (default 0.0.0.0)
+```
 
-## Tanzu Hub CVE enrichment — fresh deploy
+## Deploy to Cloud Foundry
 
-The Buildpack, Stack, and Container Runtime panels each show the CVEs Tanzu
-Hub reports for that component. To make this work you need a **`pyi-creds`
-credhub service instance in every space you deploy to** — the app reads the
-Hub credentials from that bound service (it does not take them from env).
+```sh
+cf push py-inspector -f manifest.yml
+```
 
-1. **Target the foundation API endpoint** and log in with a space operator:
+The app runs on `python_buildpack`. The root `manifest.yml` deploys 3 instances
+at 512M and declares `services: [pyi-creds]` so a Hub-cred service is bound on
+push (see below — if you don't have one yet, remove that line and the app runs
+without the Hub CVE rows).
 
-   ```sh
-   cf api https://api.sys.tanzu.kirkware.net --skip-ssl-validation
-   cf login -u <space-operator> -p <password>
-   cf target -o kirkware-devs -s cody
-   ```
+## Deploy to Kubernetes
 
-2. **Create the credential params file** (kept in `hidden/`, git-ignored). The
-   values are your Tanzu Hub service account credentials:
+Any image that runs `python3 main.py` (or a slim Python image plus the file).
+The app reads `$PORT` (default 8080); a Service exposing that port is all it
+needs. Kubernetes specifics are read from the service-account mount and
+environment, so a default ServiceAccount is enough for the basic report. On
+Kubernetes there is no `VCAP_SERVICES`, so the Tanzu Hub CVE rows show "not
+configured" unless you inject the credentials as a bound service the app can
+see (see below).
 
-   ```sh
-   mkdir -p hidden
-   cat > hidden/pyi-creds.json <<'JSON'
-   {
-     "TANZU_HUB_URL": "https://hub.tanzu.kirkware.net",
-     "TANZU_HUB_SERVICE_ACCOUNT_ID": "<service_account_id>",
-     "TANZU_HUB_SERVICE_ACCOUNT_SECRET": "<service_account_secret>",
-     "TANZU_HUB_CLIENT_SECRET": "<client_secret>"
-   }
-   JSON
-   ```
+## Tanzu Hub CVE enrichment
 
-3. **Create the `pyi-creds` credhub service in each space** (one per space; do
-   not use the cross-foundation plan — target the foundation endpoint as in
-   step 1 so `credhub default` resolves per-foundation):
+The Buildpack, Stack, and Container-Runtime panels each show the CVEs Tanzu Hub
+reports for that component. To enable this, bind a **`credhub`** service whose
+credentials carry the Hub service-account credentials — the app finds it by
+scanning `VCAP_SERVICES` for an entry with `label: credhub` that has
+`TANZU_HUB_URL` and `TANZU_HUB_SERVICE_ACCOUNT_ID`. The service can have any
+name; this repo's manifests bind one named **`pyi-creds`** (so its `services:`
+line references that name).
 
-   ```sh
-   for SPACE in cody cody-k8s cody-older-stemcell; do
-     cf target -o kirkware-devs -s "$SPACE"
-     cf create-service credhub default pyi-creds -c hidden/pyi-creds.json
-   done
-   ```
+**Required credential keys:**
 
-4. **Deploy.** Every manifest declares `services: [pyi-creds]`, so `cf push`
-   (or `./deploy.sh`) binds the service on push — the app picks the
-   credentials up from `VCAP_SERVICES` and needs no further configuration.
+```json
+{
+  "TANZU_HUB_URL": "https://hub.tanzu.<your-org>",
+  "TANZU_HUB_SERVICE_ACCOUNT_ID": "<service account id>",
+  "TANZU_HUB_SERVICE_ACCOUNT_SECRET": "<service account secret>"
+}
+```
 
-Notes:
-- `TANZU_HUB_CLIENT_SECRET` is the `key_…` client-assertion JWT from your
-  service account; only the ID + secret are used for the `client_credentials`
-  token grant (see the service account details from your Hub admin).
-- The app identifies *itself* in Hub by its CF app name, resolves the
-  foundation its VRN carries, and scopes buildpack/stack/runtime CVEs to that
-  foundation. Results are cached for 5 minutes (tune with `HUB_CACHE_TTL`).
-- The platform runtime tile is stamped per space by `deploy.sh`
-  (`HUB_RUNTIME_TILE`): cody → `Small Footprint Elastic Application Runtime`,
-  cody-older-stemcell → `Resource Segment`, cody-k8s → `N/A`.
+- `TANZU_HUB_URL` — origin of your Tanzu Hub (e.g. `https://hub.tanzu...`).
+- `TANZU_HUB_SERVICE_ACCOUNT_ID` — the Hub service-account **ID**; used as the
+  OAuth `client_id`.
+- `TANZU_HUB_SERVICE_ACCOUNT_SECRET` — the short service-account **secret**;
+  used as the OAuth `client_secret`. The app exchanges these for a token via
+  `POST {HUB_URL}/auth/z/default/oauth/token` (`client_credentials`) and caches
+  it for ~30 min.
+- (Optional) `TANZU_HUB_CLIENT_SECRET` — a `key_…` client-assertion JWT. The
+  app does **not** use it for the token grant; you can include it if your
+  credhub entry already carries it, but it is not required.
+
+**Creating the service** (on the **foundation** CF API endpoint, logged in as a
+space operator — target that endpoint, not the Hub endpoint, so `credhub
+default` resolves per-foundation):
+
+```sh
+cf api <foundation-api-endpoint>
+cf login -u <space-operator> -p <password>
+cf target -o <org> -s <space>
+
+cat > pyi-creds.json <<'JSON'
+{
+  "TANZU_HUB_URL": "https://hub.tanzu.<your-org>",
+  "TANZU_HUB_SERVICE_ACCOUNT_ID": "<id>",
+  "TANZU_HUB_SERVICE_ACCOUNT_SECRET": "<secret>"
+}
+JSON
+
+cf create-service credhub default pyi-creds -c pyi-creds.json
+```
+
+Create one per space you deploy to. The repo's `manifests/` all declare
+`services: [pyi-creds]`, so `cf push` binds it on push — the app reads the
+credentials from `VCAP_SERVICES` and needs no further configuration. After
+binding, the header badge turns green "Tanzu Hub" and the three CVE rows
+populate.
+
+The app identifies *itself* in Hub by its CF app name, resolves the foundation
+its VRN carries, and scopes buildpack/stack/runtime CVEs to that foundation.
+Results are cached for 5 minutes (tune with `HUB_CACHE_TTL`).
 
 ## Kernel CVE lookup (OSV) — no setup
 
-The Stack panel's **`Stemcell - CVEs (OSV)`** row looks up Linux kernel CVEs
-for the *running* kernel via the public [OSV API](https://api.osv.dev/) — no
+The Stack panel's **`Stemcell - CVEs (OSV)`** row looks up Linux kernel CVEs for
+the *running* kernel via the public [OSV API](https://api.osv.dev/) — no
 credentials and no service binding needed. OSV indexes Ubuntu kernels by the
 **source package** `linux` and the **full Debian version** `X.Y.Z-<abi>.<upload>`
 (e.g. `5.15.0-202.212`) under the ecosystem string `Ubuntu:<distro>:LTS`. The
@@ -139,77 +170,32 @@ range), so the raw total (~2.5k for a jammy 5.15 kernel) is *"CVEs tracked
 against this kernel version"*, not open exposure. To keep the row simple the
 app lists only **critical- and high-severity** CVE IDs — medium, low and
 negligible are counted during the lookup but not shown. The lookup warms in a
-background thread on startup (serialised behind the Hub CVE fetch to keep
-memory flat), is cached for 30 minutes (`OSV_CACHE_TTL`), and trims the huge
-`versions`/`ranges`/`affected` fields during JSON parse so the build peaks
-well under a 512M instance. The row shows "querying OSV…" with a running count
-until it completes. Non-Ubuntu stacks show "not applicable". Tunables:
-`OSV_MAX_PAGES` (page cap, default 120), `OSV_PAGE_TIMEOUT`, `OSV_API_URL`
-(override for tests).
+background thread on startup (serialised behind the Hub CVE fetch to keep memory
+flat), is cached for 30 minutes (`OSV_CACHE_TTL`), and trims the huge
+`versions`/`ranges`/`affected` fields during JSON parse so the build peaks well
+under a 512M instance. The row shows "querying OSV…" with a running count until
+it completes. Non-Ubuntu stacks show "not applicable". Tunables: `OSV_MAX_PAGES`
+(page cap, default 120), `OSV_PAGE_TIMEOUT`, `OSV_API_URL` (override for tests).
 
-## Run locally
+## Configuration
 
-```sh
-python3 main.py          # PORT env honored (default 8080)
-```
+Environment variables (all optional; the app runs with none of them set):
 
-## Deploy to Cloud Foundry
-
-```sh
-cf push kirkware-py-inspector -f manifest.yml
-```
-
-## Deployment matrix (concurrent)
-
-`manifests/` holds one manifest per deployment. Each runs **3 instances** at
-**128M** (the app idles ~25–35M RSS). `deploy.sh SPACE MANIFEST` targets the
-space, stamps the live git origin/commit plus the manifest's stack and
-org-resolved buildpack name/version, and pushes (app name = manifest
-basename). All nine run concurrently, across all three spaces:
-
-| App | Space | Stack | Buildpack | Route |
-|---|---|---|---|---|
-| `pyi-fs4` | cody (VM) | cflinuxfs4 | python_buildpack (1.8.119) | pyi-fs4.apps.tanzu.kirkware.net |
-| `pyi-fs1` | cody (VM) | tanzucflinuxfs1 | python_buildpack (1.8.119) | pyi-fs1.apps.tanzu.kirkware.net |
-| `pyi-fs4-old` | cody (VM) | cflinuxfs4 | python_buildpack_1_8_102 | pyi-fs4-old.apps.tanzu.kirkware.net |
-| `pyi-fs4-k8s` | cody-k8s (VKS) | cflinuxfs4 | python_buildpack (1.8.119) | pyi-fs4-k8s.apps.tanzu.kirkware.net |
-| `pyi-fs1-k8s` | cody-k8s (VKS) | tanzucflinuxfs1 | python_buildpack (1.8.119) | pyi-fs1-k8s.apps.tanzu.kirkware.net |
-| `pyi-fs4-old-k8s` | cody-k8s (VKS) | cflinuxfs4 | python_buildpack_1_8_102 | pyi-fs4-old-k8s.apps.tanzu.kirkware.net |
-| `pyi-fs4-oldstem` | cody-older-stemcell (VM) | cflinuxfs4 | python_buildpack (1.8.119) | pyi-fs4-oldstem.apps.tanzu.kirkware.net |
-| `pyi-fs1-oldstem` | cody-older-stemcell (VM) | tanzucflinuxfs1 | python_buildpack (1.8.119) | pyi-fs1-oldstem.apps.tanzu.kirkware.net |
-| `pyi-fs4-old-oldstem` | cody-older-stemcell (VM) | cflinuxfs4 | python_buildpack_1_8_102 | pyi-fs4-old-oldstem.apps.tanzu.kirkware.net |
-
-Note: `cflinuxfs4` = Ubuntu 22.04, `tanzucflinuxfs1` = Ubuntu 26.04 — the two
-`*-fs1*` apps run a materially newer root filesystem. `python_buildpack_1_8_102`
-is a version-pinned buildpack (the `*-fs4-old*` apps build against 1.8.102 while
-the rest use the current 1.8.119). `cody-older-stemcell` runs on nodes with an
-older stemcell; its `-oldstem` apps compare node-age against `cody`'s.
-
-Development deployments (1 instance, `manifests/pyi-clarity-dev*.yml`):
-- `pyi-clarity-dev` in `cody` → pyi-clarity.apps.tanzu.kirkware.net
-- `pyi-clarity-dev-k8s` in `cody-k8s` → pyi-clarity-k8s.apps.tanzu.kirkware.net
-- `pyi-clarity-dev-oldstem` in `cody-older-stemcell` → pyi-clarity-oldstem.apps.tanzu.kirkware.net
-
-Test matrix used for this app:
-- VM-based Diego cells → org `kirkware-devs`, space `cody`
-- Kubernetes (VKS) → org `kirkware-devs`, space `cody-k8s`
-- Older-stemcell Diego cells → org `kirkware-devs`, space `cody-older-stemcell`
-- cf CLI against the Hub endpoint (`https://hub.tanzu.kirkware.net`)
-- `./deploy.sh SPACE MANIFEST` targets the space and pushes, stamping the live
-  `remote.origin.url` + `HEAD` plus the manifest's `stack` and the org-resolved
-  buildpack name/version (from `cf buildpacks`) into the generated manifest so
-  the running app can report its repository, commit, buildpack, and stack.
-- Pushing to GitHub: `git push https://bkirkware:$BKIRKWARE_GIT_TOKEN@github.com/bkirkware/kirkware-py-inspector.git main`
-  (the `KIRKWARE_GIT_TOKEN`/`kirkware` pair gets 403 on this repo).
-
-## Deploy to Kubernetes
-
-Any image that runs `python3 main.py` (or just a slim python image plus the
-file). The app reads `$PORT` (default 8080); a Service exposing that port is
-all it needs. K8s specifics are read from the service-account mount and
-environment, so a default ServiceAccount is enough for the basic report.
+| Var | Default | Purpose |
+|---|---|---|
+| `PORT` | `8080` | HTTP listen port |
+| `BIND` | `0.0.0.0` | HTTP bind address |
+| `HUB_CACHE_TTL` | `300` | Seconds to cache the Hub CVE payload |
+| `HUB_RUNTIME_TILE` | *(empty)* | Platform runtime tile name (exact, as it appears in your Hub catalog) for the Container-Runtime CVE row. Set to `N/A` to show "N/A" without querying; leave empty to show "not set". |
+| `HUB_URL_OVERRIDE` | *(empty)* | Override the Hub origin (tests). |
+| `OSV_API_URL` | `https://api.osv.dev/v1/query` | OSV query endpoint (tests). |
+| `OSV_CACHE_TTL` | `1800` | Seconds to cache the OSV kernel-CVE build. |
+| `OSV_MAX_PAGES` | `120` | Page cap for the OSV pagination. |
+| `OSV_PAGE_TIMEOUT` | `60` | Per-page timeout (seconds). |
+| `GIT_REPO_URL`, `GIT_COMMIT` | *(empty)* | Repository origin + commit shown in the report. CF droplets drop `.git`, so these are the in-app source; stamp them at push time if you want the UI to show them. |
+| `BUILDPACK_NAME`, `BUILDPACK_VERSION`, `APP_STACK` | *(empty)* | Stamped at push time so the app can report its buildpack/stack and resolve the matching Hub CVE rows (CF droplets can't see their own buildpack name/version or `/etc/cf-stack`). |
 
 ## Versioning
 
 Patch (third octet) increments ship with each change; minor/major only when
-instructed. Current: see `APP_VERSION` in `main.py` and the package version.
+intended. Current version: see `APP_VERSION` in `main.py`.
