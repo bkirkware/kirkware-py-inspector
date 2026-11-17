@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_NAME = "kirkware-py-inspector"
-APP_VERSION = "1.0.12"
+APP_VERSION = "1.0.13"
 START_TIME = time.time()
 HOST = os.environ.get("BIND", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -1424,6 +1424,11 @@ function render(d) {
   const cf = sec.platform.cloud_foundry, k8s = sec.platform.kubernetes;
   const os = sec.os_stack, ct = sec.container;
   const app = sec.application_layer, br = sec.buildpack_runtime || {};
+  // Stack version (e.g. cflinuxfs4 1.374.0) comes from the Hub CVE component
+  // match; only present when Hub is detected + the stack resolved a row.
+  const stackComp = (cve && cve.ok) ? (cve.components || {}).stack : null;
+  const stackVer = (stackComp && stackComp.matched && stackComp.matched.version)
+    ? stackComp.matched.version : null;
   br.buildpack = br.buildpack || {};
   br.buildpack_dep_layers = br.buildpack_dep_layers || [];
   // Tanzu Hub detection: on when the pyi-creds binding (Hub service-account
@@ -1458,7 +1463,7 @@ function render(d) {
       ['Application Layer', app.application.name + ' — v' + app.application.app_version],
       ['App Runtime', br.python ? br.python.version + ' (' + br.python.implementation + ')' : 'unknown'],
       ['Buildpack', (br.buildpack.name || 'unknown') + ' — v' + (br.buildpack.version || 'unknown')],
-      ['Stack', os.stack || 'unknown'],
+      ['Stack', (os.stack || 'unknown') + (stackVer ? ' — v' + stackVer : '')],
       ['OS release', osRelease],
       ['OS Kernel', os.kernel + ' (' + os.arch + ')'],
     ])}</table>`);
