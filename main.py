@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_NAME = "kirkware-py-inspector"
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 START_TIME = time.time()
 HOST = os.environ.get("BIND", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -583,6 +583,12 @@ def platform_info():
 HUB_CACHE_TTL = int(os.environ.get("HUB_CACHE_TTL", "300"))  # 5 min
 HUB_PAGE_SIZE = 100
 
+# Triage states to include. Hub tracks each CVE's disposition; the default
+# "affected" states are EXPLOITABLE + UNKNOWN (not yet dispositioned) and
+# IN_TRIAGE. FALSE_POSITIVE / NOT_AFFECTED / RESOLVED / RESOLVED_WITH_PEDIGREE
+# are excluded so the counts reflect real exposure.
+HUB_TRIAGE_STATES = ["EXPLOITABLE", "IN_TRIAGE", "UNKNOWN"]
+
 # Platform runtime tile, per container runtime. Kubernetes is not modeled in
 # the TAS Hub vulnerability catalog yet (future work) -> "N/A".
 HUB_RUNTIME_TILE = os.environ.get("HUB_RUNTIME_TILE", "")
@@ -676,7 +682,8 @@ def _hub_component_cves(creds, base, token, foundation_id, eds_types, name_filte
     """All component-vulnerability rows for the given EDS types + foundation,
     deduped by (name, version) and kept only when `name_filter(name, version)`
     is true. Handles cursor pagination up to a bounded page count."""
-    filt = {"entityEdsType": eds_types, "foundationId": [foundation_id]}
+    filt = {"entityEdsType": eds_types, "foundationId": [foundation_id],
+            "triageState": HUB_TRIAGE_STATES}
     nodes, after, pages = [], None, 0
     while pages < 10:
         pages += 1
@@ -831,11 +838,13 @@ def hub_cve_info():
             return _hub_cache["value"]
     creds = _hub_creds()
     if not creds:
-        return {"ok": False, "reason": "no pyi-creds (credhub) service bound"}
+        return {"ok": False, "detected": False,
+                "reason": "no pyi-creds (credhub) service bound"}
     try:
         result = _hub_build_cves(creds)
     except Exception as e:
         result = {"ok": False, "reason": str(e)}
+    result["detected"] = True
     with _hub_lock:
         _hub_cache["value"] = result
         _hub_cache["expires"] = now + HUB_CACHE_TTL
@@ -1032,6 +1041,7 @@ PAGE = """<!doctype html>
   .tag.success{ background: var(--cds-alias-status-success-tint); color: var(--cds-alias-status-success); }
   .tag.warning{ background: var(--cds-alias-status-warning-tint); color: var(--cds-color-ochre-800); }
   .tag.neutral{ background: var(--cds-alias-status-neutral-tint); color: var(--cds-alias-status-neutral); }
+  .tag.off    { background: var(--cds-color-construction-100); color: var(--cds-color-construction-500); }
   .tag.k8s    { background: #e9effd; color: var(--cds-color-k8s); }
 
   /* ---- key/value table (Clarity detail rows) ---- */
@@ -1099,6 +1109,7 @@ PAGE = """<!doctype html>
 <header class="app">
   <div class="brand"><span class="mark" id="brandicon"></span>Runtime Inspector<span class="ver" id="ver"></span></div>
   <span class="spacer"></span>
+  <span class="tag" id="hub" title="Tanzu Hub credential binding">…</span>
   <span class="tag" id="runtime">…</span>
   <button class="btn ghost" onclick="load()">↻ Refresh</button>
   <button class="btn ghost" onclick="copyJson()">Copy JSON</button>
@@ -1140,9 +1151,13 @@ function acc(label, inner) {
 // Tanzu Hub CVE accordion. `comp` = {ok, name, matched:{name,version,counts,cves,latest_patch_version}, na}.
 // `cve` = top-level hub result; when !cve.ok we surface the reason.
 function cveBlock(label, comp, cve, naMsg) {
-  if (!cve || !cve.ok) {
+  if (!cve || cve.detected === false) {
     return acc(label + ' — CVEs (Tanzu Hub)',
-      `<div class="muted" style="padding:10px 18px">unavailable — ${esc((cve && cve.reason) || 'no pyi-creds credhub service bound')}</div>`);
+      `<div class="muted" style="padding:10px 18px">Tanzu Hub not configured — bind the <span style="font-family:var(--cds-font-mono)">pyi-creds</span> credhub service (with the Hub service-account credentials) to enable CVE data.</div>`);
+  }
+  if (!cve.ok) {
+    return acc(label + ' — CVEs (Tanzu Hub)',
+      `<div class="muted" style="padding:10px 18px">unavailable — ${esc(cve.reason || 'unknown error')}</div>`);
   }
   comp = comp || {};
   const m = comp.matched;
@@ -1183,6 +1198,18 @@ function render(d) {
   const app = sec.application_layer, br = sec.buildpack_runtime || {};
   br.buildpack = br.buildpack || {};
   br.buildpack_dep_layers = br.buildpack_dep_layers || [];
+  // Tanzu Hub detection: on when the pyi-creds binding (Hub service-account
+  // credentials) is present, off otherwise.
+  const hubEl = document.getElementById('hub');
+  if (cve && cve.detected) {
+    hubEl.className = 'tag success';
+    hubEl.title = 'Tanzu Hub: ' + (cve.foundation_id || 'connected');
+    hubEl.innerHTML = ICONS.shield + 'Tanzu Hub';
+  } else {
+    hubEl.className = 'tag off';
+    hubEl.title = 'No Tanzu Hub credential binding (pyi-creds)';
+    hubEl.innerHTML = ICONS.shield + 'Tanzu Hub off';
+  }
 
   // ---- 1. Summary (group: Container Instance + Layer Summary) ----
   const idxLabel = inst.index !== null && inst.index !== undefined ? '#' + inst.index : '—';
@@ -1310,8 +1337,8 @@ function render(d) {
       ['App ID', cf.application && cf.application.application_id],
       ['Org / Space', app.application.organization ? app.application.organization + ' / ' + app.application.space : null],
       ['Uris', cf.application && (cf.application.application_uris || []).join(', ')],
-      ['CF API', app.application.cf_api],
-      ['Build ID', app.application.build_id],
+      ['CF API', cf.application && cf.application.cf_api],
+      ['Build ID', cf.application && cf.application.build_id],
       ['Services', cf.services.map(s => s.name + ' [' + s.label + ':' + s.plan + ']').join(', ') || null],
       ['Buildpack dep layers', cf.buildpack_dep_layers.map(l => l.layer + ' (' + l.tools.length + ' tools)').join('  ') || null],
     ].concat(containerRows))}</table>`;
@@ -1321,14 +1348,11 @@ function render(d) {
     platTag = 'detected';
     platCls = 'info';
   }
-  secPanels.push(card('Container platform', k8s.detected ? 'k8s' : 'cf', platTag, platCls, platBody));
-
-  // 2.6 Container Runtime (platform runtime tile CVEs from Tanzu Hub)
+  // Platform runtime tile CVEs (Tanzu Hub) live in this panel, not a separate one.
   const rtComp = (cve.components && cve.components.runtime) || {};
-  const rtName = rtComp.name || (k8s.detected ? 'Kubernetes' : 'Cloud Foundry');
-  secPanels.push(card('Container Runtime', k8s.detected ? 'k8s' : 'cf', rtName, 'neutral',
-    cveBlock('Container Runtime', rtComp, cve,
-      'Platform runtime CVEs are not tracked for Kubernetes in Tanzu Hub yet.')));
+  platBody += cveBlock('Container Runtime', rtComp, cve,
+    'Platform runtime CVEs are not tracked for Kubernetes in Tanzu Hub yet.');
+  secPanels.push(card('Container platform', k8s.detected ? 'k8s' : 'cf', platTag, platCls, platBody));
 
   panels.push(`<div class="sec-group"><h2>${ICONS.shield}Security</h2><div class="stack">${secPanels.join('')}</div></div>`);
 

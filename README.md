@@ -31,11 +31,11 @@ UI sections, one panel per row:
    - *Container platform* — Cloud Foundry (app id, uris, build, services,
      buildpack layers) and/or Kubernetes (API server, service account,
      namespace, JWT claims, k8s-app-entrypoint config). On CF-on-K8s the
-     Kubernetes facts lead and the CF overlay is shown in a collapsible.
-   - *Container Runtime* — a **CVE row** for the platform runtime tile this
-     app runs on (per space): `Small Footprint Elastic Application Runtime`
-     (cody), `Resource Segment` (cody-older-stemcell), or `N/A` (cody-k8s —
-     Kubernetes runtime is not in the TAS Hub catalog yet).
+     Kubernetes facts lead and the CF overlay is shown in a collapsible. This
+     panel also carries a **Container Runtime CVE row** for the platform
+     runtime tile this app runs on (per space): `Small Footprint Elastic
+     Application Runtime` (cody), `Resource Segment` (cody-older-stemcell), or
+     `N/A` (cody-k8s — Kubernetes runtime is not in the TAS Hub catalog yet).
 3. **Networking** — hostname + resolution, default route, DNS, listening
    sockets, per-interface detail (MAC/MTU/state/addresses), routes.
 4. **Infrastructure** — node-level resources: CPU (count × model), memory
@@ -44,7 +44,10 @@ UI sections, one panel per row:
 The header shows the detected container platform (Kubernetes wins over
 Cloud Foundry when both are present) with the official brand icon
 (Kubernetes and Cloud Foundry marks are the Simple Icons CC0 paths in their
-official colors), and app uptime in human form (e.g. `2d 3h 14m`).
+official colors), a **Tanzu Hub detection badge** (green "Tanzu Hub" when the
+`pyi-creds` credhub binding with the Hub service-account credentials is
+present, muted "Tanzu Hub off" otherwise), and app uptime in human form
+(e.g. `2d 3h 14m`).
 
 - **UI:** `GET /` — dark dashboard, "Runtime Inspector"
 - **API:** `GET /api/info` — full JSON
