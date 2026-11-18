@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 APP_NAME = "kirkware-py-inspector"
-APP_VERSION = "1.0.13"
+APP_VERSION = "1.0.14"
 START_TIME = time.time()
 HOST = os.environ.get("BIND", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -161,7 +161,10 @@ def os_info():
         "memory_total_mb": total_mb,
         "memory_available_mb": avail_mb,
         "disk": disk,
-        "cf_stack_file": _read("/etc/cf-stack"),
+        # Stack version: authoritative in-droplet source. /etc/cf-stack does
+        # not exist on these droplets; /etc/stack-version does (e.g.
+        # cflinuxfs4 -> 1.374.0, tanzucflinuxfs1 -> 0.55.0).
+        "stack_version": _read("/etc/stack-version"),
         # Stack name: env is authoritative (stamped by deploy.sh at push
         # time); /etc/cf-stack is the in-droplet fallback when present.
         "stack": os.environ.get("APP_STACK") or _read("/etc/cf-stack"),
@@ -1424,11 +1427,14 @@ function render(d) {
   const cf = sec.platform.cloud_foundry, k8s = sec.platform.kubernetes;
   const os = sec.os_stack, ct = sec.container;
   const app = sec.application_layer, br = sec.buildpack_runtime || {};
-  // Stack version (e.g. cflinuxfs4 1.374.0) comes from the Hub CVE component
-  // match; only present when Hub is detected + the stack resolved a row.
+  // Stack version (e.g. cflinuxfs4 1.374.0): /etc/stack-version inside the
+  // droplet is the authoritative source (present on every CF stack); the Hub
+  // CVE match is only a fallback (e.g. stacks Hub has no component row for,
+  // or when the file is absent).
   const stackComp = (cve && cve.ok) ? (cve.components || {}).stack : null;
-  const stackVer = (stackComp && stackComp.matched && stackComp.matched.version)
-    ? stackComp.matched.version : null;
+  const stackVer = os.stack_version
+    || (stackComp && stackComp.matched && stackComp.matched.version)
+    || null;
   br.buildpack = br.buildpack || {};
   br.buildpack_dep_layers = br.buildpack_dep_layers || [];
   // Tanzu Hub detection: on when the pyi-creds binding (Hub service-account
